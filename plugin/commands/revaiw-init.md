@@ -3,10 +3,9 @@ description: Set up revaiw (local PR reviews) in this repo
 ---
 Set up revaiw in this repository:
 
-1. Run `revaiw init` from the repo root. If `revaiw` is not on PATH, it has to be installed first. Until revaiw is
-   published, that is from a local clone (README → Install: `cargo install --path daemon` in the clone); ask the user
-   where their clone is, or to make one. Once published: `cargo install --git https://github.com/prayge/revaiw revaiw`.
-   Both need the Rust toolchain; if `cargo` is missing, tell the user to install it from https://rustup.rs and stop.
+1. Run `revaiw init` from the repo root. If `revaiw` is not installed, install it first with
+   `cargo install --git https://github.com/prayge/revaiw revaiw`. That needs the Rust toolchain; if `cargo` is
+   missing, tell the user to install it from https://rustup.rs and stop.
    If `revaiw` is installed but the shell says "command not found", `~/.cargo/bin` is not on PATH: run it as
    `~/.cargo/bin/revaiw init` and give the user the PATH line `revaiw init` prints.
 2. Show the user the prerequisite lines `revaiw init` printed, and for each ✗ give its install hint. Do not install

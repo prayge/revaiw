@@ -45,7 +45,11 @@ fn detach(cmd: &mut Command) -> &mut Command {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let cmd = args.get(1).map(String::as_str).unwrap_or("status");
-    let repo = git::Repo::discover(&std::env::current_dir().unwrap()).expect("not inside a git repo with a remote");
+    let Some(repo) = std::env::current_dir().ok().and_then(|d| git::Repo::discover(&d)) else {
+        eprintln!("revaiw: run this inside a git repository that has a remote (e.g. origin). \
+                   Commands: start | stop | status | now | sweep | watch | init | notify | guard");
+        std::process::exit(2);
+    };
     let dir = daemon::state_dir(&repo);
     fs::create_dir_all(&dir).unwrap();
     let pidf = dir.join("daemon.pid");

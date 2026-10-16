@@ -19,11 +19,9 @@ GitHub App.
 
 ## Install
 
-**Not published yet:** until `github.com/prayge/revaiw` is public, install from a local clone. From the repo root:
-
 ```bash
-cargo install --path daemon
-claude plugin marketplace add /path/to/revaiw
+cargo install --git https://github.com/prayge/revaiw revaiw    # the daemon + CLI
+claude plugin marketplace add prayge/revaiw                     # the Claude Code plugin
 claude plugin install revaiw@revaiw
 ```
 
@@ -37,13 +35,10 @@ echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc
 `revaiw init` prints this hint too when it detects the problem, and the plugin's autostart finds
 `~/.cargo/bin/revaiw` even without it.
 
-Once published:
+To update later: re-run the `cargo install --git …` line (add `--force`) and `claude plugin marketplace update revaiw`.
 
-```bash
-cargo install --git https://github.com/prayge/revaiw revaiw
-claude plugin marketplace add prayge/revaiw
-claude plugin install revaiw@revaiw
-```
+From a clone instead (to hack on revaiw): `cargo install --path daemon` and `claude plugin marketplace add
+/path/to/your/clone`, then the same `claude plugin install revaiw@revaiw`.
 
 Then, inside the repo you want reviewed, run `/revaiw-init` in Claude Code (or `revaiw init` in a shell). It writes
 `.review/config.toml` and `REVIEW.md` from `templates/` if they are absent and checks the prerequisites. Commit both
