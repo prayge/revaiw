@@ -1,0 +1,13 @@
+# Build output
+target/
+
+# revaiw's own local state (review ledgers, plan workspaces)
+.reviews/
+.superpowers/
+
+# Local development setup — kept on disk, not published
+.claude/
+CLAUDE.md
+docs/
+graphify-out/
+.graphifyignore

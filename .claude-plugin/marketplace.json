@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "revaiw",
+  "owner": { "name": "prayge" },
+  "plugins": [
+    { "name": "revaiw", "source": "./plugin", "description": "Local PR reviewer and review statusline for Claude Code", "category": "development" }
+  ]
+}

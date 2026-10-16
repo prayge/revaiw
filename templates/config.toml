@@ -1,0 +1,36 @@
+# revaiw settings for this repo. Read from the default branch on the remote, never from a PR.
+# Every key is optional; the commented values are the defaults. Docs: https://github.com/prayge/revaiw
+
+[branches]
+# base = "main"                    # default: the remote's default branch
+# skip = ["HEAD", "dependabot/*"]
+
+[ci]
+# branches = ["main"]              # pushes that run GitHub Actions (default: base)
+# pr_bases = ["main"]              # PRs into these run Actions (default: base)
+
+[review]
+# generated = []                   # extra paths never reviewed, e.g. ["/fixtures/"]
+# graphify = true
+
+[routing]
+# opus_paths = ["/prisma/schema", "/migrations/", "/auth/", "/billing/", "/stripe/", "/rls"]
+# sonnet_paths = ["/validations/", "/connectors/", "/integrations/", "/.github/workflows/", "/infra/"]
+# risk_words = ["security", "migration", "auth", "breaking", "rls", "payment"]
+
+[skills]
+# "/packages/database/" = "prisma-patterns"
+
+[triggers]
+# push = true
+# mention = "@review"
+# poll_secs = 60
+
+[fix]
+enabled = false                    # true lets `@review fix` and 👍 push fixes to PR branches
+# max_lines = 200
+
+[checks]
+# commands = ["pnpm lint"]
+# timeout_secs = 300
+# on_review = false

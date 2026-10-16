@@ -1,0 +1,33 @@
+name: Bug report
+description: Something revaiw did wrong
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: "Security problem? Don't file it here — see SECURITY.md."
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what revaiw did, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: daemon.log excerpt
+      description: The relevant lines from `<repo>/.git/revaiw/daemon.log` (remove anything private).
+      render: text
+  - type: textarea
+    id: config
+    attributes:
+      label: .review/config.toml
+      description: Your repo's config, if relevant.
+      render: toml
+  - type: input
+    id: versions
+    attributes:
+      label: Setup
+      description: "OS, `claude --version`, `gh --version`, `git --version`, and the revaiw commit."
+    validations:
+      required: true

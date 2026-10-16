@@ -1,0 +1,21 @@
+{
+  "type": "object",
+  "required": ["findings", "resolved", "still_open", "summary", "walkthrough", "incomplete"],
+  "properties": {
+    "summary": { "type": "string" },
+    "incomplete": { "type": "boolean" },
+    "resolved": { "type": "array", "items": { "type": "string" } },
+    "still_open": { "type": "array", "items": { "type": "string" } },
+    "walkthrough": { "type": "array", "items": { "type": "object", "required": ["file", "change"],
+      "properties": { "file": { "type": "string" }, "change": { "type": "string" } } } },
+    "findings": { "type": "array", "items": { "type": "object",
+      "required": ["severity", "file", "line", "summary", "why", "snippet", "lang"],
+      "properties": {
+        "severity": { "enum": ["important", "nit", "pre_existing"] },
+        "file": { "type": "string" }, "line": { "type": "integer" }, "end_line": { "type": "integer" },
+        "summary": { "type": "string" }, "why": { "type": "string" },
+        "snippet": { "type": "string" }, "lang": { "type": "string" },
+        "suggested_patch": { "type": "string" }, "suggestion": { "type": "string" },
+        "on_base": { "type": "boolean" } } } }
+  }
+}

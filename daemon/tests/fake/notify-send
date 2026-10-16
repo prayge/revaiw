@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Fake notify-send for e2e: never pops a real desktop notification, only logs the call.
+echo "notify-send $*" >> "$FAKE_LOG"

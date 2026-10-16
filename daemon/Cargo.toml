@@ -1,0 +1,21 @@
+[package]
+name = "revaiw"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libc = "0.2.190"
+notify = "8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1.1.8"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+panic = "abort"
+codegen-units = 1

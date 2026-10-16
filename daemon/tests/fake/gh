@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+echo "$*" >> "$FAKE_LOG"
+case "$*" in
+  "repo view"*) echo "o/r" ;;
+  "pr list --head"*) echo '[{"number":7,"baseRefName":"main"}]' ;;
+  "pr list --state open"*) echo '[{"number":7,"headRefName":"feat/x","baseRefName":"main","isCrossRepository":false}]' ;;
+  "api repos/o/r/issues/comments?since="*) cat "$FAKE_GH/comments.json" 2>/dev/null || echo '[]' ;;
+  "api repos/o/r/collaborators/kim/permission"*) echo "write" ;;
+  "api repos/o/r/collaborators/"*) echo "read" ;;
+  "api repos/o/r/pulls/7/comments"*) echo '[]' ;;
+  "api -X POST repos/o/r/pulls/7/reviews"*) echo '{"id":1}' ;;
+  "api repos/o/r/pulls/7/reviews/1/comments"*) echo '[]' ;;
+  "api graphql"*) echo '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[]},"comments":{"nodes":[]}}}}}' ;;
+  "run list"*) echo '[]' ;;
+  *) echo '{}' ;;
+esac

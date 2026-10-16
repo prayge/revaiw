@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Fake claude CLI for e2e: answers by which stage is calling, logs every call.
+echo "$*" >> "$FAKE_LOG"
+args="$*"
+# Order matters: the formatter's prompt quotes "/code-review findings", so match it (--json-schema) first.
+if [[ "$args" == *"--json-schema"* ]]; then
+  [[ "$args" == *"is n=0 handled"* ]] && echo "formatter-request-seen" >> "$FAKE_LOG"
+  echo '{"is_error":false,"result":"ok","structured_output":{"summary":"1 important","incomplete":false,"resolved":[],"still_open":[],"walkthrough":[],"findings":[{"severity":"important","file":"a.ts","line":1,"summary":"off by one","why":"n=0 crashes","snippet":"x","lang":"ts"}]}}'
+elif [[ "$args" == *"/code-review"* ]]; then
+  [[ "$args" == *"is n=0 handled"* ]] && echo "engine-request-seen" >> "$FAKE_LOG"
+  echo '{"is_error":false,"result":"```json\n[{\"file\":\"a.ts\",\"line\":1,\"summary\":\"off by one\",\"failure_scenario\":\"n=0 crashes\"}]\n```","permission_denials":[]}'
+elif [[ "$args" == *"Change nothing else"* ]]; then
+  echo "fix-cwd $PWD" >> "$FAKE_LOG"
+  echo "fixed" >> a.ts   # the fix engine edits the finding's file in its cwd (the fix worktree U)
+  echo '{"is_error":false,"result":"<id>: fixed"}'
+else
+  echo '{"is_error":true,"result":"unexpected call"}'
+fi

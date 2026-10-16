@@ -1,0 +1,9 @@
+{
+  "name": "revaiw",
+  "version": "0.1.0",
+  "description": "Local PR reviews on your Claude subscription: every push, @review mentions, 👍 to fix. Plus a review statusline segment.",
+  "author": { "name": "prayge" },
+  "repository": "https://github.com/prayge/revaiw",
+  "license": "MIT",
+  "keywords": ["code-review", "pull-request", "statusline", "github"]
+}
