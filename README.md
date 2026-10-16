@@ -45,6 +45,11 @@ Then, inside the repo you want reviewed, run `/revaiw-init` in Claude Code (or `
 files to the repo's default branch, then `revaiw start`. The plugin starts the daemon automatically in later
 sessions of a repo that has `.review/config.toml`.
 
+**Opt-in per repo.** Installing the plugin (user scope) changes nothing on its own: in any repo without a
+`.review/config.toml` its hooks exit immediately and silently. Nothing is started, polled, reviewed or posted, and
+no statusline is changed. A repo opts in only by committing `.review/config.toml` to its default branch. To pause a
+repo that opted in, run `revaiw stop`; the plugin respects that and does not restart it until `revaiw start`.
+
 ## Prerequisites
 
 **Tested on; other setups are untested.** macOS and other Linux distributions are not supported yet.
