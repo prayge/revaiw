@@ -13,7 +13,7 @@ if [ -f "$RSD/stopped" ]; then say "revaiw is stopped (deliberately, via \`revai
 REVAIW="$(command -v revaiw || true)"
 [ -z "$REVAIW" ] && [ -x "$HOME/.cargo/bin/revaiw" ] && REVAIW="$HOME/.cargo/bin/revaiw"
 if [ -z "$REVAIW" ]; then
-  say "This repo is set up for revaiw (.review/config.toml) but the \`revaiw\` binary is not on PATH. Install it from a local clone of revaiw (README → Install: \`cargo install --path daemon\`); once revaiw is published, \`cargo install --git https://github.com/prayge/revaiw revaiw\`. Or run /revaiw-init."
+  say "This repo is set up for revaiw (.review/config.toml) but the \`revaiw\` binary is not on PATH. Install it with \`cargo install --git https://github.com/prayge/revaiw revaiw\` (needs the Rust toolchain), or run /revaiw-init."
   exit 0
 fi
 mkdir -p "$RSD"
