@@ -1,10 +1,34 @@
 name: Bug report
 description: Something revaiw did wrong
+title: "[Bug]: "
 labels: [bug]
 body:
   - type: markdown
     attributes:
-      value: "Security problem? Don't file it here — see SECURITY.md."
+      value: |
+        Thanks for reporting. **Security problem?** Don't file it here — use the private report link (see SECURITY.md).
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before you file
+      options:
+        - label: I searched the existing issues and this isn't a duplicate.
+          required: true
+        - label: I'm on the latest `main` (re-run `cargo install --git https://github.com/prayge/revaiw revaiw --force`).
+          required: false
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Daemon (reviews, queue, routing, config)
+        - Fixes (@review fix, 👍, push)
+        - GitHub (mentions, comments, reactions, CI)
+        - Claude Code plugin (hooks, commands, statusline)
+        - Install / setup
+        - Not sure
+    validations:
+      required: true
   - type: textarea
     id: what
     attributes:
@@ -12,6 +36,13 @@ body:
       description: What you did, what revaiw did, and what you expected instead.
     validations:
       required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. ...
+        2. ...
   - type: textarea
     id: log
     attributes:
@@ -25,9 +56,14 @@ body:
       description: Your repo's config, if relevant.
       render: toml
   - type: input
-    id: versions
+    id: version
+    attributes:
+      label: revaiw version
+      description: The commit you installed (`git ls-remote https://github.com/prayge/revaiw main`, or your clone's `git rev-parse --short HEAD`).
+  - type: input
+    id: setup
     attributes:
       label: Setup
-      description: "OS, `claude --version`, `gh --version`, `git --version`, and the revaiw commit."
+      description: "OS, `claude --version`, `gh --version`, `git --version`."
     validations:
       required: true
