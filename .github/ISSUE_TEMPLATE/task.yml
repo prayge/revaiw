@@ -1,0 +1,20 @@
+name: Maintenance task
+description: Tooling, refactoring, dependencies, CI or other housekeeping
+title: "[Chore]: "
+labels: [chore]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What needs doing
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why
+  - type: textarea
+    id: done
+    attributes:
+      label: Done when
+      placeholder: "- [ ] ...\n- [ ] tests / scripts/verify.sh pass"
