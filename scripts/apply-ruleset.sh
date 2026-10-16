@@ -9,7 +9,10 @@
 set -euo pipefail
 repo="${1:-prayge/revaiw}"
 file="$(cd "$(dirname "$0")/.." && pwd)/.github/rulesets/protect-main.json"
-id="$(gh api "repos/$repo/rulesets" --jq '.[] | select(.name=="protect-main") | .id' 2>/dev/null || true)"
+# Only a successful listing counts: on an error (e.g. 403 on a private repo without a paid plan) gh prints the
+# error body on stdout, which must never be read as an id.
+id="$(gh api "repos/$repo/rulesets" --jq '.[] | select(.name=="protect-main") | .id' 2>/dev/null)" || id=""
+[[ "$id" =~ ^[0-9]*$ ]] || id=""
 if [ -n "$id" ]; then
   gh api -X PUT "repos/$repo/rulesets/$id" --input "$file" --jq '"updated ruleset \(.name) (#\(.id)): \(.enforcement)"'
 else
