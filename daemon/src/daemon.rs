@@ -36,6 +36,16 @@ pub fn settings_dir() -> PathBuf {
     settings_root(std::env::var("XDG_STATE_HOME").ok().as_deref(), &PathBuf::from(std::env::var("HOME").unwrap_or_default()))
 }
 
+/// A `notify` or `guard` marker left in the repo's state dir by a build before they were per machine: moved to the
+/// machine's settings, so upgrading never turns a setting off. Returns the names moved.
+pub fn move_repo_settings(state_dir: &Path, settings: &Path) -> Vec<&'static str> {
+    ["notify", "guard"].into_iter().filter(|name| {
+        let old = state_dir.join(name);
+        old.exists() && fs::create_dir_all(settings).is_ok() && fs::write(settings.join(name), "").is_ok()
+            && fs::remove_file(&old).is_ok()
+    }).collect()
+}
+
 /// Desktop notifications are off unless the `notify` marker exists (`revaiw notify on`). Checked at each use.
 pub fn notify_enabled(state_dir: &std::path::Path) -> bool {
     state_dir.join("notify").exists()
@@ -206,6 +216,9 @@ pub fn run(repo: Repo) {
     }
     log!("started pid {} watching {} ({} branches, {} slots)", st.pid, refs.display(), snap.len(),
          allocate::slots_from(std::env::var("REVAIW_SLOTS").ok().as_deref()));
+    for name in move_repo_settings(&dir, &settings_dir()) {
+        log!("moved this repo's `{name}` setting to {}: it is per machine now", settings_dir().display());
+    }
 
     let slots = allocate::slots_from(std::env::var("REVAIW_SLOTS").ok().as_deref());
     let mut inbox = crate::inbox::Inbox::load(&dir, &cfg, now());
@@ -1053,6 +1066,16 @@ mod tests {
         assert_eq!(super::ci_verdict("uat", h, None, 0, 0), "uat: ✅ ready to merge @f647c6c (review clean, CI green)");
         assert_eq!(super::ci_verdict("uat", h, Some(14), 0, 2), "uat: CI green @f647c6c #14, review partial (see its comment)");
         assert_eq!(super::ci_verdict("uat", h, Some(14), 3, 0), "uat: CI green @f647c6c #14, 3 important still open");
+    }
+    #[test]
+    fn a_setting_turned_on_in_a_repo_moves_to_the_machine() {
+        let (repo, machine) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let settings = machine.path().join("revaiw");
+        std::fs::write(repo.path().join("guard"), "").unwrap();
+        assert_eq!(super::move_repo_settings(repo.path(), &settings), vec!["guard"]);
+        assert!(super::guard_enabled(&settings) && !repo.path().join("guard").exists());
+        assert!(!super::notify_enabled(&settings));
+        assert!(super::move_repo_settings(repo.path(), &settings).is_empty());
     }
     #[test]
     fn machine_settings_live_in_the_users_state_dir_not_the_repo() {
