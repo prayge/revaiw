@@ -6,6 +6,9 @@ fail() { echo "FAIL: $*"; exit 1; }
 for f in "$here/.claude-plugin/plugin.json" "$here/hooks/hooks.json" "$here/../.claude-plugin/marketplace.json"; do
   python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$f" || fail "bad json $f"
 done
+# No pinned version: Claude Code then versions the plugin by commit, so `claude plugin update` picks up every push.
+python3 -c 'import json,sys; sys.exit("version" in json.load(open(sys.argv[1])))' "$here/.claude-plugin/plugin.json" \
+  || fail "plugin.json pins a version, so updates never reach installed copies"
 python3 - "$here" <<'PY' || fail "hook command points at a missing file"
 import json, os, re, sys
 root = sys.argv[1]
