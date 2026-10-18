@@ -854,6 +854,22 @@ fn timing(queued_at: u64, started: u64, finished: u64, posted: u64) -> String {
     if queued_at == 0 { format!("⏱ {review}") } else { format!("⏱ wait {}s · {review}", started.saturating_sub(queued_at)) }
 }
 
+/// `branch@sha7`, then ` #<pr>` when the branch has an open PR. The PR goes after the commit: `revaiw watch` matches
+/// on the `review <branch>@` prefix.
+fn at(branch: &str, head: &str, pr: Option<u64>) -> String {
+    format!("{branch}@{}{}", &head[..7], pr.map(|n| format!(" #{n}")).unwrap_or_default())
+}
+
+/// The desktop pop-up for a result line. With several agents at work, the title says whose it is: the worktree the
+/// branch is checked out in, and its PR. The body is the line, then that worktree's path.
+fn notification(line: &str, pr: Option<u64>, worktree: Option<&Path>) -> (String, String) {
+    let place = worktree.and_then(|w| w.file_name()).map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "not checked out".into());
+    let pr = pr.map(|n| format!("#{n}")).unwrap_or_else(|| "no PR".into());
+    let body = match worktree { Some(w) => format!("{line}\n{}", w.display()), None => line.to_string() };
+    (format!("revaiw · {place} · {pr}"), body)
+}
+
 /// Returns the branch's open important findings after this run.
 fn record(repo: &Repo, cfg: &Config, st: &mut Status, j: &Job, o: &crate::model::ReviewOutput, t: u64, ci: bool) -> usize {
     let lp = ledger_path(repo, &j.branch);
@@ -885,8 +901,10 @@ fn record(repo: &Repo, cfg: &Config, st: &mut Status, j: &Job, o: &crate::model:
     let _ = fs::create_dir_all(md.parent().unwrap());
     let _ = fs::write(&md, &body);
 
+    let pr = github::pr_for(&j.branch);
+    let pr_number = pr.as_ref().map(|p| p.number);
     if github::posting_enabled() {
-        let target = github::repo_slug().zip(github::pr_for(&j.branch));
+        let target = github::repo_slug().zip(pr);
         if target.is_none() { log!("{}: no open PR, kept local only", j.branch); }
         if let Some((slug, pr)) = target {
             if let Err(e) = github::post_comment(&slug, &pr, &body) { log!("{}: comment: {e}", j.branch); }
@@ -930,21 +948,24 @@ fn record(repo: &Repo, cfg: &Config, st: &mut Status, j: &Job, o: &crate::model:
     let model = if j.kind == Kind::Ci { format!("ci:{}", j.route.model) } else { j.route.model.clone() };
     let d = Done { branch: j.branch.clone(), head: j.entry.head.clone(), model,
                    effort: j.route.effort.into(), reason: j.route.reason.clone(), important: n("important"),
-                   nits: n("nit"), pre_existing: n("pre_existing"), md: md.display().to_string(), finished_at: t };
+                   nits: n("nit"), pre_existing: n("pre_existing"), md: md.display().to_string(), finished_at: t,
+                   pr: pr_number };
+    let at = at(&d.branch, &d.head, d.pr);
     // These lines are the event stream for `watch.sh` (Claude's Monitor tool): keep the prefixes stable.
     let line = match j.kind {
-        Kind::Ci => format!("ci {}@{}: 🧪 {} important, {} pre-existing · {tm} → {}", d.branch, &d.head[..7], d.important, d.pre_existing, d.md),
-        Kind::Review if d.important > 0 => format!("review {}@{}: 🔴 {} important, {} nits · {tm} → {}", d.branch, &d.head[..7], d.important, d.nits, d.md),
-        Kind::Review if o.partial() => format!("review {}@{}: ⚠️ partial (0 important, {} nits; {}) · {tm} → {}",
-                                               d.branch, &d.head[..7], d.nits, o.gaps(), d.md),
+        Kind::Ci => format!("ci {at}: 🧪 {} important, {} pre-existing · {tm} → {}", d.important, d.pre_existing, d.md),
+        Kind::Review if d.important > 0 => format!("review {at}: 🔴 {} important, {} nits · {tm} → {}", d.important, d.nits, d.md),
+        Kind::Review if o.partial() => format!("review {at}: ⚠️ partial (0 important, {} nits; {}) · {tm} → {}",
+                                               d.nits, o.gaps(), d.md),
         // An engine job never reaches here: `advance` hands it to the formatter, whose output is recorded. Nor does a
         // checks job (it hands over to the engine) or a fix job (`finish_fix` reports it).
-        Kind::Review | Kind::Checks | Kind::Engine | Kind::Fix | Kind::FixChecks => format!("review {}@{}: clean (0 important, {} nits){} · {tm} → {}", d.branch, &d.head[..7], d.nits,
+        Kind::Review | Kind::Checks | Kind::Engine | Kind::Fix | Kind::FixChecks => format!("review {at}: clean (0 important, {} nits){} · {tm} → {}", d.nits,
                                 if ci { ", waiting for CI" } else { "" }, d.md),
     };
     log!("{line}");
     if notify_enabled(&state_dir(repo)) {
-        let _ = std::process::Command::new("notify-send").args(["Review done", &line])
+        let (title, body) = notification(&line, d.pr, repo.worktree_of(&j.branch).as_deref());
+        let _ = std::process::Command::new("notify-send").args([&title, &body])
             .stdout(Stdio::null()).stderr(Stdio::null()).spawn();
     }
     let important = d.important;
@@ -1036,6 +1057,22 @@ mod tests {
         std::fs::write(&req, "feat/b\n").unwrap(); // an append after the take lands in a fresh file
         assert_eq!(super::take_requests(&req).as_deref(), Some("feat/b\n"));
         assert!(super::take_requests(&req).is_none());
+    }
+    #[test]
+    fn a_result_names_its_pr_after_the_commit() {
+        // `revaiw watch` matches "review <branch>@": the PR goes after the commit so that prefix stays put.
+        assert_eq!(super::at("uat", "f647c6c0123", Some(42)), "uat@f647c6c #42");
+        assert_eq!(super::at("fix/a", "cfd6309abcd", None), "fix/a@cfd6309");
+    }
+    #[test]
+    fn a_notification_says_which_worktree_and_pr() {
+        let wt = std::path::Path::new("/r/.claude/worktrees/indexnow-decode");
+        let (title, body) = super::notification("review fix/a@cfd6309 #7: clean", Some(7), Some(wt));
+        assert_eq!(title, "revaiw · indexnow-decode · #7");
+        assert_eq!(body, "review fix/a@cfd6309 #7: clean\n/r/.claude/worktrees/indexnow-decode");
+        let (title, body) = super::notification("ci uat@f647c6c: 🧪", None, None);
+        assert_eq!(title, "revaiw · not checked out · no PR");
+        assert_eq!(body, "ci uat@f647c6c: 🧪");
     }
     #[test]
     fn timing_splits_wait_review_and_post() {

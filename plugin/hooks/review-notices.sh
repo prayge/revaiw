@@ -45,7 +45,7 @@ with open(stamp, "a") as f:  # also refreshes the mtime used by the fast path
     f.write("".join(c["md"] + "\n" for c in fresh))
 if not (branch and fresh):
     raise SystemExit
-lines = [f"review {c['branch']}@{c['head'][:7]} ({c['model'].replace('claude-', '')}): "
+lines = [f"review {c['branch']}@{c['head'][:7]}{' #%s' % c['pr'] if c.get('pr') else ''} ({c['model'].replace('claude-', '')}): "
          f"{c['important']} important, {c['nits']} nits → {c['md']}" for c in fresh]
 msg = "\n".join(lines)
 if event == "PostToolUse":

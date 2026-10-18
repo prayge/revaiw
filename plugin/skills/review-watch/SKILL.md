@@ -30,6 +30,8 @@ Monitor  command: revaiw watch <branch>
 
 ## 2. Act on each line
 
+`review` and `ci` lines carry the PR after the commit when the branch has one open (`review <b>@<sha> #42: …`).
+
 | Line | Do |
 |---|---|
 | `review <b>@<sha>: 🔴 N important … → <md>` | Read `<md>`. For each important finding: if it has a `suggested_patch` in the ledger (`.reviews/<b>/ledger.json` in the main worktree, absolute path in the line), apply it with `git apply` from this worktree's root. Otherwise fix it by hand. If it is wrong, mark it `dismissed` with a one-line `decision_reason` in the ledger. Then run the area's tests, commit and push the branch. The next review checks the fix. |
