@@ -154,6 +154,11 @@ impl Inbox {
         match cmd {
             Cmd::Review { model, text } => acts.push(Action::Review { branch: branch.clone(), pr: c.pr, model,
                 request: Request { login: c.login.clone(), text, comment_id: c.id } }),
+            Cmd::Fix { .. } if cfg.fix.enabled && cfg.is_trunk(branch) => {
+                // A promotion PR's head is the trunk: a fix would land there with no review.
+                gh.say(c.pr, &format!("{}\nrevaiw never pushes a fix to `{branch}` because it is a trunk branch. \
+                                       Fix it on a feature branch instead.", crate::render::MARKER));
+            }
             Cmd::Fix { ids } if cfg.fix.enabled => acts.push(Action::Fix { branch: branch.clone(), pr: c.pr, ids,
                 login: c.login.clone(), comment_id: Some(c.id) }),
             Cmd::Fix { .. } => {
@@ -195,6 +200,9 @@ impl Inbox {
                     },
                 }
                 match mention::act(&r.content) {
+                    Some(Act::Fix) if cfg.fix.enabled && cfg.is_trunk(branch) => {
+                        log!("reaction by {} on #{}: no fix queued, `{branch}` is a trunk branch", r.login, pr.number);
+                    }
                     Some(Act::Fix) if cfg.fix.enabled => acts.push(Action::Fix { branch: branch.into(), pr: pr.number, ids: vec![fid.clone()],
                                                                                 login: r.login.clone(), comment_id: None }),
                     Some(Act::Dismiss) => dismissed |= ledger.dismiss(fid, &format!("👎 by {}", r.login)),
@@ -295,6 +303,31 @@ mod tests {
                         prs: vec![("feat/x".into(), 7)], ..Default::default() };
         assert!(inbox(d.path()).poll(&gh, &cfg(false), 100, &|b| d.path().join(b)).is_empty());
         assert!(gh.log.borrow().iter().any(|l| l.starts_with("say 7") && l.contains("enabled = true")));
+    }
+    #[test] fn a_fix_request_on_a_trunk_head_is_answered_not_queued() {
+        let d = tempfile::tempdir().unwrap();
+        // A promotion PR: head `uat` into `master`. Even with fixes on, the fix would land on the trunk unreviewed.
+        let mut c = cfg(true);
+        c.ci.branches.push("uat".into());
+        let gh = Fake { comments: vec![comment(1, "kim", "@review fix")], perms: vec![("kim", "write")],
+                        prs: vec![("uat".into(), 7)], ..Default::default() };
+        assert!(inbox(d.path()).poll(&gh, &c, 100, &|b| d.path().join(b)).is_empty());
+        assert!(gh.log.borrow().iter().any(|l| l.starts_with("say 7") && l.contains("`uat`") && l.contains("trunk")
+                                                && l.contains("feature branch")));
+    }
+    #[test] fn fixes_off_is_answered_before_the_trunk_refusal() {
+        let d = tempfile::tempdir().unwrap();
+        let gh = Fake { comments: vec![comment(1, "kim", "@review fix")], perms: vec![("kim", "write")],
+                        prs: vec![("main".into(), 7)], ..Default::default() };
+        assert!(inbox(d.path()).poll(&gh, &cfg(false), 100, &|b| d.path().join(b)).is_empty());
+        assert!(gh.log.borrow().iter().any(|l| l.starts_with("say 7") && l.contains("enabled = true") && !l.contains("trunk")));
+    }
+    #[test] fn a_fix_request_on_a_feature_branch_is_still_queued() {
+        let d = tempfile::tempdir().unwrap();
+        let gh = Fake { comments: vec![comment(1, "kim", "@review fix")], perms: vec![("kim", "write")],
+                        prs: vec![("feat/x".into(), 7)], ..Default::default() };
+        assert_eq!(inbox(d.path()).poll(&gh, &cfg(true), 100, &|b| d.path().join(b)),
+                   vec![Action::Fix { branch: "feat/x".into(), pr: 7, ids: vec![], login: "kim".into(), comment_id: Some(1) }]);
     }
     #[test] fn the_first_poll_starts_from_now_not_from_history() {
         let d = tempfile::tempdir().unwrap();
@@ -421,5 +454,20 @@ mod tests {
         assert!(i.poll(&gh, &cfg(true), 200, &ledger_of).is_empty());
         assert_eq!(Ledger::load(&lp).findings[&id].status, "open", "a non-writer's 👎 dismisses nothing");
         assert!(!gh.log.borrow().contains(&"sync".to_string()));
+    }
+    #[test] fn a_thumbs_up_on_a_trunk_head_queues_no_fix_but_a_thumbs_down_still_dismisses() {
+        let d = tempfile::tempdir().unwrap();
+        let lp = d.path().join("main").join("ledger.json");
+        let id = ledger_with_comment(&lp);
+        let mut gh = Fake { perms: vec![("kim", "write")], prs: vec![("main".into(), 7)],
+                            review_comments: vec![ReviewComment { id: 55, relevant: 1 }],
+                            reactions: vec![Reaction { id: 1, login: "kim".into(), content: "+1".into() }], ..Default::default() };
+        let ledger_of = |b: &str| d.path().join(b).join("ledger.json");
+        let mut i = inbox(d.path());
+        assert!(i.poll(&gh, &cfg(true), 100, &ledger_of).is_empty(), "a 👍 on a trunk head queues no fix");
+        gh.review_comments = vec![ReviewComment { id: 55, relevant: 2 }];
+        gh.reactions.push(Reaction { id: 2, login: "kim".into(), content: "-1".into() });
+        assert!(i.poll(&gh, &cfg(true), 200, &ledger_of).is_empty());
+        assert_eq!(Ledger::load(&lp).findings[&id].status, "dismissed", "dismissing still works there");
     }
 }
