@@ -30,7 +30,7 @@ Monitor  command: revaiw watch <branch>
 
 ## 2. Act on each line
 
-`review` and `ci` lines carry the PR after the commit when the branch has one open (`review <b>@<sha> #42: …`).
+`review` and `ci` lines, and the CI verdicts (`✅ ready to merge`, `CI green`), carry the PR after the commit when the branch has one open (`review <b>@<sha> #42: …`, `<b>: ✅ ready to merge @<sha> #42 …`).
 
 | Line | Do |
 |---|---|

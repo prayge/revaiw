@@ -83,8 +83,8 @@ Run these from inside the repo.
 | `revaiw sweep [--apply] [branch...]` | Brings open PRs' threads and comments in line with the ledger (resolves fixed threads, reopens regressed ones, hides stale comments). A dry run unless `--apply`. |
 | `revaiw watch [branch]` | Prints event lines (`review ...`, `ci ...`, `fix ...`) for a branch. This is what the plugin's `review-watch` skill reads. |
 | `revaiw init` | Writes `.review/config.toml` and `REVIEW.md` from the templates if absent, and checks prerequisites. |
-| `revaiw notify on\|off` | Turns desktop pop-ups (`notify-send`) on or off. Off by default. Each pop-up's title names the worktree the branch is checked out in and its PR (`revaiw · indexnow-decode · #42`), so results from several agents are easy to tell apart. Per machine, not per repo. With no argument it prints the current setting. |
-| `revaiw guard on\|off` | Turns the resource guard (below) on or off. Off by default. Per machine, not per repo. With no argument it prints the current setting. |
+| `revaiw notify on\|off` | Turns desktop pop-ups (`notify-send`) on or off. Off by default. Each pop-up's title names the worktree the branch is checked out in and its PR (`revaiw · indexnow-decode · #42`), so results from several agents are easy to tell apart. Pop-ups cover review results and CI verdicts (✅ ready to merge, CI green). Per machine, not per repo: the setting lives in `$XDG_STATE_HOME/revaiw` (else `~/.local/state/revaiw`). With no argument it prints the current setting. |
+| `revaiw guard on\|off` | Turns the resource guard (below) on or off. Off by default. Per machine, not per repo (stored next to `notify`). With no argument it prints the current setting. |
 
 ## Resource use
 

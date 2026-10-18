@@ -2,7 +2,7 @@
 # Event stream of revaiw results for one branch, meant for Claude's Monitor tool: every stdout line
 # becomes a notification in the conversation that armed it, so each conversation watches its own branch.
 #   revaiw watch [branch]      (default: the current branch; any worktree)
-# Lines (" #<pr>" follows <sha> on review and ci lines when the branch has an open PR):
+# Lines (" #<pr>" follows <sha> on review, ci and CI-verdict lines when the branch has an open PR):
 #        "review <b>@<sha>: 🔴 N important …" · "review …: clean …, waiting for CI" · "review …: ⚠️ partial …"
 #        "ci <b>@<sha>: 🧪 …" · "fix <b>@<sha>: 🔧 pushed <ids> → <sha>" · "fix <b>@<sha>: ⛔ not pushed (<reason>)" · "<b>: ⚠️ partial review @<sha> …"
 #        "<b>: ✅ ready to merge @<sha> …" · "<b>: CI green …" · "<b>: … failed …" · "revaiw stopped"

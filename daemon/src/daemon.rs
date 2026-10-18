@@ -25,6 +25,27 @@ pub fn state_dir(repo: &Repo) -> PathBuf {
     repo.common.join("revaiw")
 }
 
+/// Per-machine settings (`notify`, `guard`): `$XDG_STATE_HOME` (else `~/.local/state`) `/revaiw`, shared by every repo's
+/// daemon, since both are about this desktop and this box rather than one repo.
+fn settings_root(xdg: Option<&str>, home: &Path) -> PathBuf {
+    let state = xdg.filter(|x| x.starts_with('/')).map(PathBuf::from).unwrap_or_else(|| home.join(".local/state"));
+    state.join("revaiw")
+}
+
+pub fn settings_dir() -> PathBuf {
+    settings_root(std::env::var("XDG_STATE_HOME").ok().as_deref(), &PathBuf::from(std::env::var("HOME").unwrap_or_default()))
+}
+
+/// A `notify` or `guard` marker left in the repo's state dir by a build before they were per machine: moved to the
+/// machine's settings, so upgrading never turns a setting off. Returns the names moved.
+pub fn move_repo_settings(state_dir: &Path, settings: &Path) -> Vec<&'static str> {
+    ["notify", "guard"].into_iter().filter(|name| {
+        let old = state_dir.join(name);
+        old.exists() && fs::create_dir_all(settings).is_ok() && fs::write(settings.join(name), "").is_ok()
+            && fs::remove_file(&old).is_ok()
+    }).collect()
+}
+
 /// Desktop notifications are off unless the `notify` marker exists (`revaiw notify on`). Checked at each use.
 pub fn notify_enabled(state_dir: &std::path::Path) -> bool {
     state_dir.join("notify").exists()
@@ -64,6 +85,8 @@ struct CiWatch {
     important: usize,
     /// Reads the head's last review was refused: a partial review is never ✅.
     refused: usize,
+    /// The open PR when the review was recorded, for the verdict line.
+    pr: Option<u64>,
 }
 
 struct CiJob {
@@ -193,6 +216,9 @@ pub fn run(repo: Repo) {
     }
     log!("started pid {} watching {} ({} branches, {} slots)", st.pid, refs.display(), snap.len(),
          allocate::slots_from(std::env::var("REVAIW_SLOTS").ok().as_deref()));
+    for name in move_repo_settings(&dir, &settings_dir()) {
+        log!("moved this repo's `{name}` setting to {}: it is per machine now", settings_dir().display());
+    }
 
     let slots = allocate::slots_from(std::env::var("REVAIW_SLOTS").ok().as_deref());
     let mut inbox = crate::inbox::Inbox::load(&dir, &cfg, now());
@@ -204,7 +230,7 @@ pub fn run(repo: Repo) {
         while rx.try_recv().is_ok() { dirty = true; }
         let t = now();
         let mut changed = false;
-        let guard_on = guard_enabled(&dir);
+        let guard_on = guard_enabled(&settings_dir());
         if !guard_on { holding = false; }
 
         tick += 1;
@@ -348,11 +374,7 @@ pub fn run(repo: Repo) {
                 }
                 Some(github::CiState::Passed) => {
                     // A watch only exists once its head's review is recorded (finish), so the count is always known.
-                    match (w.important, w.refused) {
-                        (0, 0) => log!("{b}: ✅ ready to merge @{} (review clean, CI green)", &w.head[..7]),
-                        (0, _) => log!("{b}: CI green @{}, review partial (see its comment)", &w.head[..7]),
-                        (n, _) => log!("{b}: CI green @{}, {n} important still open", &w.head[..7]),
-                    }
+                    announce(&repo, b, &ci_verdict(b, &w.head, w.pr, w.important, w.refused), w.pr);
                     w.since = 0;
                 }
                 _ => {}
@@ -811,7 +833,7 @@ fn finish(repo: &Repo, cfg: &Config, q: &mut Queue, st: &mut Status, ci_due: &mu
             let mut o = o;
             // A refused tool call is something the engine could not read or check: partial, never ✅.
             if is_review { o.refused = j.refused.clone(); }
-            let important = record(repo, cfg, st, &j, &o, t, ci);
+            let (important, pr) = record(repo, cfg, st, &j, &o, t, ci);
             let unread = usize::from(is_review && o.partial());
             if unread > 0 {
                 log!("{}: ⚠️ partial review @{}, /code-review {} (see the review comment)", j.branch, &j.entry.head[..7], o.gaps());
@@ -820,14 +842,15 @@ fn finish(repo: &Repo, cfg: &Config, q: &mut Queue, st: &mut Status, ci_due: &mu
                 if unread > 0 { return None; }
                 // No GitHub CI for this head (not on `ci.branches`, no open PR into `ci.pr_bases`): the review is
                 // the whole remote verdict. Same wording as the CI-green lines below, so review-watch reads it the same way.
+                let at = format!("@{}{}", &j.entry.head[..7], pr.map(|n| format!(" #{n}")).unwrap_or_default());
                 match important {
-                    0 => log!("{}: ✅ ready to merge @{} (review clean; no GitHub CI for this branch)", j.branch, &j.entry.head[..7]),
+                    0 => announce(repo, &j.branch, &format!("{}: ✅ ready to merge {at} (review clean; no GitHub CI for this branch)", j.branch), pr),
                     n => log!("{}: review done @{}, {n} important still open", j.branch, &j.entry.head[..7]),
                 }
                 return None;
             }
             is_review.then(|| (j.branch.clone(), CiWatch { head: j.entry.head.clone(), told_skipped: false, since: t, polled: t,
-                                                          important, refused: unread }))
+                                                          important, refused: unread, pr }))
         }
         review::Outcome::UsageLimit(until) => {
             log!("{}: usage limit, paused until {until}", j.branch);
@@ -871,7 +894,7 @@ fn notification(line: &str, pr: Option<u64>, worktree: Option<&Path>) -> (String
 }
 
 /// Returns the branch's open important findings after this run.
-fn record(repo: &Repo, cfg: &Config, st: &mut Status, j: &Job, o: &crate::model::ReviewOutput, t: u64, ci: bool) -> usize {
+fn record(repo: &Repo, cfg: &Config, st: &mut Status, j: &Job, o: &crate::model::ReviewOutput, t: u64, ci: bool) -> (usize, Option<u64>) {
     let lp = ledger_path(repo, &j.branch);
     let mut ledger = Ledger::load(&lp);
     let mut o = o.clone();
@@ -962,15 +985,30 @@ fn record(repo: &Repo, cfg: &Config, st: &mut Status, j: &Job, o: &crate::model:
         Kind::Review | Kind::Checks | Kind::Engine | Kind::Fix | Kind::FixChecks => format!("review {at}: clean (0 important, {} nits){} · {tm} → {}", d.nits,
                                 if ci { ", waiting for CI" } else { "" }, d.md),
     };
+    announce(repo, &j.branch, &line, d.pr);
+    let (important, pr) = (d.important, d.pr);
+    st.push_done(d);
+    (important, pr)
+}
+
+/// Logs a result line, and pops it up on the desktop when notifications are on (`revaiw notify on`).
+fn announce(repo: &Repo, branch: &str, line: &str, pr: Option<u64>) {
     log!("{line}");
-    if notify_enabled(&state_dir(repo)) {
-        let (title, body) = notification(&line, d.pr, repo.worktree_of(&j.branch).as_deref());
+    if notify_enabled(&settings_dir()) {
+        let (title, body) = notification(line, pr, repo.worktree_of(branch).as_deref());
         let _ = std::process::Command::new("notify-send").args([&title, &body])
             .stdout(Stdio::null()).stderr(Stdio::null()).spawn();
     }
-    let important = d.important;
-    st.push_done(d);
-    important
+}
+
+/// The line for a head whose CI passed. Wording is matched by review-watch and `revaiw report`.
+fn ci_verdict(branch: &str, head: &str, pr: Option<u64>, important: usize, refused: usize) -> String {
+    let at = format!("@{}{}", &head[..7], pr.map(|n| format!(" #{n}")).unwrap_or_default());
+    match (important, refused) {
+        (0, 0) => format!("{branch}: ✅ ready to merge {at} (review clean, CI green)"),
+        (0, _) => format!("{branch}: CI green {at}, review partial (see its comment)"),
+        (n, _) => format!("{branch}: CI green {at}, {n} important still open"),
+    }
 }
 
 
@@ -1020,6 +1058,32 @@ mod tests {
         assert_eq!(super::next_config(&good, loaded(Config::default(), Some("no HEAD"), false)).0, good);
         // File deleted on a readable trunk: no error, defaults are the repo's.
         assert_eq!(super::next_config(&good, loaded(Config::default(), None, true)).0, Config::default());
+    }
+    #[test]
+    fn a_ci_verdict_names_its_pr_after_the_commit() {
+        let h = "f647c6c0123";
+        assert_eq!(super::ci_verdict("uat", h, Some(14), 0, 0), "uat: ✅ ready to merge @f647c6c #14 (review clean, CI green)");
+        assert_eq!(super::ci_verdict("uat", h, None, 0, 0), "uat: ✅ ready to merge @f647c6c (review clean, CI green)");
+        assert_eq!(super::ci_verdict("uat", h, Some(14), 0, 2), "uat: CI green @f647c6c #14, review partial (see its comment)");
+        assert_eq!(super::ci_verdict("uat", h, Some(14), 3, 0), "uat: CI green @f647c6c #14, 3 important still open");
+    }
+    #[test]
+    fn a_setting_turned_on_in_a_repo_moves_to_the_machine() {
+        let (repo, machine) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let settings = machine.path().join("revaiw");
+        std::fs::write(repo.path().join("guard"), "").unwrap();
+        assert_eq!(super::move_repo_settings(repo.path(), &settings), vec!["guard"]);
+        assert!(super::guard_enabled(&settings) && !repo.path().join("guard").exists());
+        assert!(!super::notify_enabled(&settings));
+        assert!(super::move_repo_settings(repo.path(), &settings).is_empty());
+    }
+    #[test]
+    fn machine_settings_live_in_the_users_state_dir_not_the_repo() {
+        let home = std::path::Path::new("/home/u");
+        assert_eq!(super::settings_root(None, home), home.join(".local/state/revaiw"));
+        assert_eq!(super::settings_root(Some("/xdg"), home), std::path::PathBuf::from("/xdg/revaiw"));
+        assert_eq!(super::settings_root(Some(""), home), super::settings_root(None, home));
+        assert_eq!(super::settings_root(Some("rel"), home), super::settings_root(None, home));
     }
     #[test]
     fn notifications_are_off_until_the_marker_exists() {

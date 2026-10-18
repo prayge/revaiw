@@ -46,6 +46,9 @@ fn detach(cmd: &mut Command) -> &mut Command {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let cmd = args.get(1).map(String::as_str).unwrap_or("status");
+    // A CLI piped into `head` ends quietly when the reader goes away, as other tools do. Not the daemon: it writes to
+    // its children, and a closed pipe there must be an error it handles, not its death.
+    if cmd != "__daemon" { unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL); } }
     let Some(repo) = std::env::current_dir().ok().and_then(|d| git::Repo::discover(&d)) else {
         eprintln!("revaiw: run this inside a git repository that has a remote (e.g. origin). \
                    Commands: start | stop | status | report | now | sweep | watch | init | notify | guard");
@@ -152,19 +155,21 @@ fn main() {
             println!("  log: {}", dir.join("daemon.log").display());
         }
         "notify" => {
-            let marker = dir.join("notify");
+            let settings = daemon::settings_dir();
+            let marker = settings.join("notify");
             match cli::notify_arg(&args[2..]).unwrap_or_else(|e| { eprintln!("{e}"); std::process::exit(2) }) {
-                Some(true) => { fs::write(&marker, "").unwrap(); println!("desktop notifications on"); }
+                Some(true) => { fs::create_dir_all(&settings).unwrap(); fs::write(&marker, "").unwrap(); println!("desktop notifications on (this machine)"); }
                 Some(false) => { let _ = fs::remove_file(&marker); println!("desktop notifications off"); }
-                None => println!("desktop notifications {}", if daemon::notify_enabled(&dir) { "on" } else { "off" }),
+                None => println!("desktop notifications {}", if daemon::notify_enabled(&settings) { "on" } else { "off" }),
             }
         }
         "guard" => {
-            let marker = dir.join("guard");
+            let settings = daemon::settings_dir();
+            let marker = settings.join("guard");
             match cli::guard_arg(&args[2..]).unwrap_or_else(|e| { eprintln!("{e}"); std::process::exit(2) }) {
-                Some(true) => { fs::write(&marker, "").unwrap(); println!("resource guard on"); }
+                Some(true) => { fs::create_dir_all(&settings).unwrap(); fs::write(&marker, "").unwrap(); println!("resource guard on (this machine)"); }
                 Some(false) => { let _ = fs::remove_file(&marker); println!("resource guard off"); }
-                None => println!("resource guard {}", if daemon::guard_enabled(&dir) { "on" } else { "off" }),
+                None => println!("resource guard {}", if daemon::guard_enabled(&settings) { "on" } else { "off" }),
             }
         }
         "now" => {
@@ -185,8 +190,8 @@ fn main() {
             if st.paused_until > daemon::now() { println!("paused (usage limit) until epoch {}", st.paused_until); }
             for r in &st.running { println!("  ▶ {} @{} on {}", r.branch, &r.head[..7], r.model); }
             for (b, e) in &q.entries { println!("  … {} @{} queued", b, &e.head[..7]); }
-            println!("notifications: {}", if daemon::notify_enabled(&dir) { "on" } else { "off" });
-            println!("resource guard: {}", if daemon::guard_enabled(&dir) { "on" } else { "off" });
+            println!("notifications: {}", if daemon::notify_enabled(&daemon::settings_dir()) { "on" } else { "off" });
+            println!("resource guard: {}", if daemon::guard_enabled(&daemon::settings_dir()) { "on" } else { "off" });
             println!("  ✓ {} today · ✗ {} failed", st.done_today, st.failed);
             for d in st.completed.iter().rev().take(5) {
                 println!("    {} @{}{} {}i {}n → {}", d.branch, &d.head[..7], d.pr.map(|n| format!(" #{n}")).unwrap_or_default(),
