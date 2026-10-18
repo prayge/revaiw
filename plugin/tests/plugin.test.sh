@@ -27,6 +27,16 @@ out=$(printf '{"cwd":"%s"}' "$t" | bash "$here/statusline/rev-segment.sh")
 echo '{"running":[{"branch":"feat/login","head":"abc","model":"claude-sonnet-5-5","pid":1,"started_at":0}]}' > "$t/.git/revaiw/status.json"
 out=$(printf '{"cwd":"%s"}' "$t" | bash "$here/statusline/rev-segment.sh")
 [[ "$out" == *"▶ login (sonnet)"* ]] || fail "running segment: $out"
+# Chat hook: a finished review for this conversation's branch, with its PR when it has one.
+git -C "$t" checkout -q -b feat/login
+cat > "$t/.git/revaiw/status.json" <<'J'
+{"running":[],"completed":[
+ {"branch":"feat/login","head":"abc1234def","model":"claude-sonnet-5-5","effort":"e","reason":"r","important":1,"nits":2,"pre_existing":0,"md":"/x/1.md","finished_at":1,"pr":42},
+ {"branch":"feat/login","head":"bcd2345efa","model":"claude-haiku-5-5","effort":"e","reason":"r","important":0,"nits":0,"pre_existing":0,"md":"/x/2.md","finished_at":2}]}
+J
+out=$(printf '{"session_id":"s1","cwd":"%s","hook_event_name":"UserPromptSubmit"}' "$t" | bash "$here/hooks/review-notices.sh")
+[[ "$out" == *"review feat/login@abc1234 #42 (sonnet-5-5): 1 important, 2 nits"* ]] || fail "notice with PR: $out"
+[[ "$out" == *"review feat/login@bcd2345 (haiku-5-5): 0 important"* ]] || fail "notice without PR: $out"
 # Unconfigured repo: silent.
 rm -rf "$t/.review" "$t/.git/revaiw"
 out=$(printf '{"cwd":"%s"}' "$t" | bash "$here/statusline/rev-segment.sh")

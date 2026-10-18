@@ -14,6 +14,7 @@ mod mention;
 mod model;
 mod queue;
 mod render;
+mod report;
 mod review;
 mod route;
 mod status;
@@ -47,7 +48,7 @@ fn main() {
     let cmd = args.get(1).map(String::as_str).unwrap_or("status");
     let Some(repo) = std::env::current_dir().ok().and_then(|d| git::Repo::discover(&d)) else {
         eprintln!("revaiw: run this inside a git repository that has a remote (e.g. origin). \
-                   Commands: start | stop | status | now | sweep | watch | init | notify | guard");
+                   Commands: start | stop | status | report | now | sweep | watch | init | notify | guard");
         std::process::exit(2);
     };
     let dir = daemon::state_dir(&repo);
@@ -142,6 +143,14 @@ fn main() {
             }
             if !apply { println!("dry run: revaiw sweep --apply [branch...] makes these changes"); }
         }
+        "report" => {
+            let hours = report::hours_arg(&args[2..]).unwrap_or_else(|e| { eprintln!("{e}"); std::process::exit(2) });
+            // The rotated log first, so a window that spans the rotation reads in order.
+            let log: String = ["daemon.log.1", "daemon.log"].iter()
+                .map(|f| fs::read_to_string(dir.join(f)).unwrap_or_default()).collect();
+            print!("{}", report::render(&report::summarize(&log, daemon::now().saturating_sub(hours * 3600)), hours));
+            println!("  log: {}", dir.join("daemon.log").display());
+        }
         "notify" => {
             let marker = dir.join("notify");
             match cli::notify_arg(&args[2..]).unwrap_or_else(|e| { eprintln!("{e}"); std::process::exit(2) }) {
@@ -180,7 +189,8 @@ fn main() {
             println!("resource guard: {}", if daemon::guard_enabled(&dir) { "on" } else { "off" });
             println!("  ✓ {} today · ✗ {} failed", st.done_today, st.failed);
             for d in st.completed.iter().rev().take(5) {
-                println!("    {} @{} {}i {}n → {}", d.branch, &d.head[..7], d.important, d.nits, d.md);
+                println!("    {} @{}{} {}i {}n → {}", d.branch, &d.head[..7], d.pr.map(|n| format!(" #{n}")).unwrap_or_default(),
+                         d.important, d.nits, d.md);
             }
         }
     }

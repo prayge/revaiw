@@ -78,11 +78,12 @@ Run these from inside the repo.
 | `revaiw start` | Starts the daemon for this repo (or restarts it if the binary or posting mode changed). |
 | `revaiw stop` | Stops the daemon and cancels running reviews. |
 | `revaiw status` | Shows whether it runs, what is running or queued, today's totals and recent reviews. Also the default with no argument. |
+| `revaiw report [hours]` | Sums up the last 24 hours (or `hours`) of `daemon.log`: reviews by result, partial reviews, timings, CI diagnoses, failures, refused commands and GitHub errors. The plugin's `revaiw-health` skill runs it. |
 | `revaiw now [--model haiku\|sonnet\|opus] [branch...]` | Queues a review of the whole branch against its base, now. Defaults to the current branch. |
 | `revaiw sweep [--apply] [branch...]` | Brings open PRs' threads and comments in line with the ledger (resolves fixed threads, reopens regressed ones, hides stale comments). A dry run unless `--apply`. |
 | `revaiw watch [branch]` | Prints event lines (`review ...`, `ci ...`, `fix ...`) for a branch. This is what the plugin's `review-watch` skill reads. |
 | `revaiw init` | Writes `.review/config.toml` and `REVIEW.md` from the templates if absent, and checks prerequisites. |
-| `revaiw notify on\|off` | Turns desktop pop-ups (`notify-send`) on or off. Off by default. Per machine, not per repo. With no argument it prints the current setting. |
+| `revaiw notify on\|off` | Turns desktop pop-ups (`notify-send`) on or off. Off by default. Each pop-up's title names the worktree the branch is checked out in and its PR (`revaiw · indexnow-decode · #42`), so results from several agents are easy to tell apart. Per machine, not per repo. With no argument it prints the current setting. |
 | `revaiw guard on\|off` | Turns the resource guard (below) on or off. Off by default. Per machine, not per repo. With no argument it prints the current setting. |
 
 ## Resource use

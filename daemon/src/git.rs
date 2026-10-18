@@ -53,6 +53,14 @@ impl Repo {
         self.git(&["rev-parse", "--verify", "--quiet", &format!("refs/remotes/{}/{branch}", self.remote)])
     }
 
+    /// The worktree `branch` is checked out in (the main checkout or a linked one, e.g. an agent's), if any.
+    pub fn worktree_of(&self, branch: &str) -> Option<PathBuf> {
+        let want = format!("branch refs/heads/{branch}");
+        self.git(&["worktree", "list", "--porcelain"])?.split("\n\n")
+            .find(|w| w.lines().any(|l| l == want))
+            .and_then(|w| w.lines().find_map(|l| l.strip_prefix("worktree ")).map(PathBuf::from))
+    }
+
     /// The remote's default branch (`refs/remotes/<remote>/HEAD`); None when that is not set.
     pub fn default_branch(&self) -> Option<String> {
         self.git(&["symbolic-ref", "--short", &format!("refs/remotes/{}/HEAD", self.remote)])
@@ -285,6 +293,17 @@ mod tests {
         (t, repo, base)
     }
 
+    #[test]
+    fn a_branch_maps_to_the_worktree_it_is_checked_out_in() {
+        let (t, repo, _) = fixture();
+        let wt = tempfile::tempdir().unwrap();
+        let d = wt.path().join("agent-a");
+        sh(t.path(), &["worktree", "add", "-q", "-b", "feat/x", d.to_str().unwrap()]);
+        assert_eq!(repo.worktree_of("uat"), Some(repo.root.clone()));
+        assert_eq!(repo.worktree_of("feat/x"), Some(d.canonicalize().unwrap()));
+        assert_eq!(repo.worktree_of("feat"), None, "a prefix of a branch is not that branch");
+        assert_eq!(repo.worktree_of("nope"), None);
+    }
     #[test]
     fn files_at_head_drop_deletes_and_split_renames() {
         let (t, repo, base) = fixture();

@@ -146,8 +146,10 @@ pub fn session_dir(home: &Path, wt: &Path) -> PathBuf {
 /// Tool rules for the engine's main session (`--append-system-prompt`) and every subagent it starts
 /// (`--append-subagent-system-prompt`, documented since v2.1.205 though absent from `--help`).
 const ENGINE_TOOLS: &str = "Tool use in this review: Prefer the Read, Grep and Glob tools and \
-    `git show <rev>:<path>` to open files. Shell commands are limited to git reads, grep, cat, head, tail, wc, ls. \
-    Do not run programs from the repository, install anything, or use the network: the review runs in \
+    `git show <rev>:<path>` to open files. Shell commands are limited to git reads, grep, cat, head, tail, wc, ls, \
+    one plain command per call (a pipe into grep, head or wc is fine). These are refused, and each refusal makes the \
+    review partial: for/while loops, variable assignments (`x=…`), command substitution `$(…)`, `cd … &&`, awk and \
+    sed. For a line range use Read with offset and limit; for many files use the Grep tool or `git grep`. Do not run programs from the repository, install anything, or use the network: the review runs in \
     a sandbox with no network and no access outside the checkout, so a refused call only makes the review partial. \
     When graphify is allowed, orient with it before reading files.";
 
@@ -424,6 +426,14 @@ mod tests {
         assert!(g.contains("`prisma-patterns`") && g.contains(".claude/skills/prisma-patterns/SKILL.md"), "{g}");
         assert!(!g.contains("domain-rules"));
         assert_eq!(skill_guidance(&c, &["README.md".into()]), "");
+    }
+    #[test] fn the_engine_is_told_which_shell_shapes_are_refused() {
+        // Under `dontAsk`, loops, `x=$(…)` assignments and awk/sed skip the sandbox's auto-allow and are refused,
+        // which makes the review partial: the guidance names each shape and the tool to use instead.
+        for want in ["one plain command per call", "for/while loops", "variable assignments", "$(…)", "awk", "sed",
+                     "Read with offset and limit"] {
+            assert!(ENGINE_TOOLS.contains(want), "missing {want:?}: {ENGINE_TOOLS}");
+        }
     }
     #[test] fn graphify_is_allowed_only_when_configured() {
         let has = |g: bool| engine_command(Path::new("/wt"), &r("m", "low"), "a", "b", "G", g)
