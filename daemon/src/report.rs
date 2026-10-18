@@ -100,6 +100,11 @@ pub fn render(r: &Report, hours: u64) -> String {
     out
 }
 
+/// The epoch the window starts at; a window longer than the clock covers the whole log.
+pub fn cutoff(now: u64, hours: u64) -> u64 {
+    now.saturating_sub(hours.saturating_mul(3600))
+}
+
 /// `revaiw report [hours]`: the window, 24 h unless given.
 pub fn hours_arg(args: &[String]) -> Result<u64, String> {
     match args.first() {
@@ -162,6 +167,11 @@ not a log line
         let one = render(&summarize("[1] inbox: error connecting to api.github.com\n", 0), 6);
         assert!(one.contains("errors (1 kind):"), "{one}");
     }
+    #[test] fn a_huge_window_covers_the_whole_log() {
+        assert_eq!(cutoff(10_000, 1), 6_400);
+        assert_eq!(cutoff(10_000, u64::MAX), 0);
+    }
+
     #[test] fn hours_default_to_24_and_must_be_a_positive_number() {
         assert_eq!(hours_arg(&[]), Ok(24));
         assert_eq!(hours_arg(&["6".into()]), Ok(6));

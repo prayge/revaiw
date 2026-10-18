@@ -148,7 +148,7 @@ fn main() {
             // The rotated log first, so a window that spans the rotation reads in order.
             let log: String = ["daemon.log.1", "daemon.log"].iter()
                 .map(|f| fs::read_to_string(dir.join(f)).unwrap_or_default()).collect();
-            print!("{}", report::render(&report::summarize(&log, daemon::now().saturating_sub(hours * 3600)), hours));
+            print!("{}", report::render(&report::summarize(&log, report::cutoff(daemon::now(), hours)), hours));
             println!("  log: {}", dir.join("daemon.log").display());
         }
         "notify" => {
