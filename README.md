@@ -123,6 +123,16 @@ Fix checkouts live under `$XDG_CACHE_HOME/revaiw/<hash>/runs/` (default `~/.cach
 edits under any `.git/` path. For the same reason, findings in paths Claude Code protects (`.git`, `.vscode`,
 `.idea`, `.claude`, `.husky`, `.cargo`, `.devcontainer`, `.yarn`, `.mvn`, `.config/git`) cannot be auto-fixed.
 
+What a push gets reviewed for:
+
+- A follow-up push is reviewed from its previous head. Code it merged in from another remote branch (a trunk
+  back-merge, `uat`, a stacked branch) was reviewed there and is skipped; a push that only merges is not reviewed.
+- Dismissed and deferred findings from every branch's ledger, and a `## Rulings` section in the PR description
+  (from a writer), reach the reviewer as settled decisions it does not raise again.
+- Follow-ups report important findings only, run on Sonnet at most (unless over 1500 lines or 40 files), and count
+  earlier nits instead of listing them again.
+- When every failed CI run has an empty log (an Actions outage), revaiw says so in one line and does not diagnose.
+
 ## Config
 
 Per-repo behaviour comes from `.review/config.toml`, read from the repo's default branch (the trunk), never from a

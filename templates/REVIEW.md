@@ -41,7 +41,7 @@ reachable from real inputs on a path that is live today.
 generated output (a stale or hand-edited generated file *is* reported).
 
 **Follow-up pushes**: while earlier findings are still open, report important findings only. A push after a
-clean review is new work and gets a full review.
+clean review is new work and gets a full review. Earlier nits are counted, not listed again.
 
 ## 3. Repo gates
 
