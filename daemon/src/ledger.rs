@@ -107,6 +107,12 @@ impl Ledger {
         !self.to_check().is_empty()
     }
 
+    /// A fix of an important finding is under way: one is open or parked as `recheck`. Routing reads this, not
+    /// `follow_up`: new work on a risky path after a review that left only nits still gets the large model.
+    pub fn fixing(&self) -> bool {
+        self.to_check().iter().any(|(_, e)| e.f.severity == "important")
+    }
+
     /// The PR comments of findings settled in the ledger (fixed, dismissed): their threads get resolved. Deferred
     /// is postponed, not settled, so its thread stays open.
     pub fn closed_comment_ids(&self) -> std::collections::HashSet<u64> {
@@ -315,6 +321,15 @@ mod tests {
         assert!(!l.follow_up(), "a clean first review leaves the next push a full review");
         l.merge(&ReviewOutput { findings: vec![fnd("a.ts", "bug")], ..Default::default() }, "b");
         assert!(l.follow_up());
+    }
+    #[test] fn fixing_only_while_an_important_finding_is_open_or_rechecked() {
+        let mut l = Ledger::default();
+        l.merge(&ReviewOutput { findings: vec![Finding { severity: "nit".into(), ..fnd("a.ts", "style") }], ..Default::default() }, "a");
+        assert!(l.follow_up() && !l.fixing(), "open nits alone are not a fix in progress");
+        l.merge(&ReviewOutput { findings: vec![fnd("a.ts", "bug")], ..Default::default() }, "b");
+        assert!(l.fixing());
+        for e in l.findings.values_mut() { e.status = if e.f.severity == "nit" { "open" } else { "recheck" }.into(); }
+        assert!(l.fixing(), "a parked recheck is still being fixed");
     }
     #[test] fn follow_up_reviews_keep_only_important() {
         let mut l = Ledger::default();

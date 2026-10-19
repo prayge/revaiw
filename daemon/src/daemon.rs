@@ -514,7 +514,7 @@ fn run_tag(b: &str, head: &str) -> String {
 /// the engine.
 fn start(repo: &Repo, cfg: &Config, b: &str, e: Entry) -> Option<Job> {
     let files = repo.numstat(&e.base, &e.head);
-    let fu = follow_up(&Ledger::load(&ledger_path(repo, b)), &e);
+    let fu = fixing(&Ledger::load(&ledger_path(repo, b)), &e);
     let route = e.model.as_deref().and_then(|t| route::pinned(cfg, t))
         .unwrap_or_else(|| route::route(cfg, &files, &repo.messages(&e.base, &e.head), fu));
     let runs = state_dir(repo).join("runs");
@@ -616,7 +616,7 @@ fn start_ci(repo: &Repo, cfg: &Config, c: CiJob) -> Option<Job> {
     let out = runs.join(format!("{}-ci.json", run_tag(&c.branch, &c.head)));
     let Some(child) = spawn(review::ci_command(&wt, &route, &prompt), &out, &c.branch) else { cleanup(repo, &wt); return None };
     log!("ci diagnosis {} @{} on {}", c.branch, &c.head[..7], route.model);
-    let entry = Entry { base: c.head.clone(), head: c.head.clone(), queued_at: 0, model: None, attempts: 0, request: None };
+    let entry = Entry { base: c.head.clone(), head: c.head.clone(), queued_at: 0, model: None, attempts: 0, request: None, whole: false };
     Some(Job { kind: Kind::Ci, branch: c.branch.clone(), entry, route, child, out, ci: Some(c), started: now(),
                worktree: Some(wt), refused: vec![], fix: None })
 }
@@ -695,7 +695,7 @@ fn start_fix(repo: &Repo, cfg: &Config, b: &str, f: FixJob, head: &str) -> Optio
     let cmd = fix::command(&u, &cfg.fix.model, &fix::prompt(b, head, &items));
     let Some(child) = spawn(cmd, &out, b) else { cleanup(repo, &u); return None };
     log!("fix {b} @{} on {} for {} finding(s), requested by @{}", &head[..7], cfg.fix.model, items.len(), f.login);
-    let entry = Entry { base, head: head.into(), queued_at: f.queued_at, model: None, attempts: 0, request: None };
+    let entry = Entry { base, head: head.into(), queued_at: f.queued_at, model: None, attempts: 0, request: None, whole: false };
     let route = Route { model: cfg.fix.model.clone(), effort: "medium", level: "fix", reason: "requested fix".into() };
     Some(Job { kind: Kind::Fix, branch: b.into(), entry, route, child, out, ci: None, started: now(),
                worktree: Some(u), refused: vec![], fix: Some((f, items, vec![])) })
@@ -851,9 +851,16 @@ fn rulings_if_writer(rulings: String, permission: Result<String, String>) -> Res
     }
 }
 
-/// A pinned `revaiw now` asks for a second opinion, so it is never a nits-free follow-up.
+/// A pinned `revaiw now` asks for a second opinion and an unpinned one (or `@review`) for the whole branch, so
+/// neither is a nits-free follow-up (spec C5: a full review lists them again).
 fn follow_up(ledger: &Ledger, e: &Entry) -> bool {
-    ledger.follow_up() && e.model.is_none()
+    ledger.follow_up() && e.model.is_none() && !e.whole
+}
+
+/// Routing's follow-up flag (a risky path drops to the medium model): only while important findings are being
+/// fixed, and never for a pinned or whole-branch review.
+fn fixing(ledger: &Ledger, e: &Entry) -> bool {
+    ledger.fixing() && e.model.is_none() && !e.whole
 }
 
 fn ledger_path(repo: &Repo, b: &str) -> PathBuf {
@@ -1172,9 +1179,25 @@ mod tests {
                           why: "y".into(), snippet: String::new(), lang: String::new(), suggested_patch: None,
                           suggestion: None, on_base: false };
         l.merge(&ReviewOutput { findings: vec![f], ..Default::default() }, "s");
-        let e = Entry { base: "a".into(), head: "b".into(), queued_at: 0, model: None, attempts: 0, request: None };
+        let e = Entry { base: "a".into(), head: "b".into(), queued_at: 0, model: None, attempts: 0, request: None, whole: false };
         assert!(super::follow_up(&l, &e));
-        assert!(!super::follow_up(&l, &Entry { model: Some("sonnet".into()), ..e }));
+        assert!(!super::follow_up(&l, &Entry { model: Some("sonnet".into()), ..e.clone() }));
+        assert!(!super::follow_up(&l, &Entry { whole: true, ..e }), "`now` / @review is a full review");
+    }
+    #[test]
+    fn only_a_fix_in_progress_routes_a_risky_push_off_the_large_model() {
+        use crate::{ledger::Ledger, model::{Finding, ReviewOutput}, queue::Entry};
+        let f = |s: &str| Finding { severity: s.into(), file: "a.ts".into(), line: 1, end_line: None, summary: s.into(),
+                                    why: "y".into(), snippet: String::new(), lang: String::new(), suggested_patch: None,
+                                    suggestion: None, on_base: false };
+        let e = Entry { base: "a".into(), head: "b".into(), queued_at: 0, model: None, attempts: 0, request: None, whole: false };
+        let mut l = Ledger::default();
+        l.merge(&ReviewOutput { findings: vec![f("nit")], ..Default::default() }, "s");
+        assert!(super::follow_up(&l, &e) && !super::fixing(&l, &e), "only nits open: new work gets the large model");
+        l.merge(&ReviewOutput { findings: vec![f("nit"), f("important")], ..Default::default() }, "t");
+        assert!(super::fixing(&l, &e));
+        assert!(!super::fixing(&l, &Entry { whole: true, ..e.clone() }));
+        assert!(!super::fixing(&l, &Entry { model: Some("sonnet".into()), ..e }));
     }
     #[test]
     fn requests_are_taken_by_rename_so_late_appends_survive() {

@@ -11,7 +11,7 @@ pub struct Route {
 }
 
 /// Small model by default; the medium one for large or risky ranges; the large one for very large ranges or ones
-/// on `routing.opus_paths`. Decided from git alone, no model call. A follow-up (fixing open findings) goes to the
+/// on `routing.opus_paths`. Decided from git alone, no model call. A follow-up (fixing open important findings) goes to the
 /// medium model for `opus_paths`: the large model on every fix push found edges of edges (spec C4). The size rules
 /// still apply.
 pub fn route(c: &Config, files: &[(u32, u32, String)], messages: &str, follow_up: bool) -> Route {

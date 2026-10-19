@@ -43,6 +43,9 @@ pub struct Entry {
     /// A `@review` mention's request. A later push keeps it: the question still applies to the newer head.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request: Option<Request>,
+    /// `revaiw now` / `@review`: the whole branch, so a full review (nits listed again), never a follow-up.
+    #[serde(default)]
+    pub whole: bool,
 }
 
 fn is_zero(n: &u32) -> bool { *n == 0 }
@@ -79,14 +82,14 @@ impl Queue {
             Some(r) if is_ancestor(&r.head, head) => if is_ancestor(&r.head, base) { base.to_string() } else { r.head.clone() },
             _ => base.to_string(),
         };
-        self.entries.insert(branch.into(), Entry { base, head: head.into(), queued_at: now, model: None, attempts: 0, request: None });
+        self.entries.insert(branch.into(), Entry { base, head: head.into(), queued_at: now, model: None, attempts: 0, request: None, whole: false });
     }
 
     /// A `revaiw now` request: always the whole branch (`base` is its merge-base with the base branch), replacing a
     /// pending entry's range and skipping push's running-head shortcut, which on an unchanged head would
     /// queue an empty range. Due at once.
     pub fn push_now(&mut self, branch: &str, base: &str, head: &str, model: Option<String>, request: Option<Request>) {
-        self.entries.insert(branch.into(), Entry { base: base.into(), head: head.into(), queued_at: 0, model, attempts: 0, request });
+        self.entries.insert(branch.into(), Entry { base: base.into(), head: head.into(), queued_at: 0, model, attempts: 0, request, whole: true });
     }
 
     pub fn push_fix(&mut self, branch: &str, ids: Vec<String>, login: &str, comment_id: Option<u64>, now: u64) {
@@ -111,7 +114,7 @@ impl Queue {
             let Some(head) = head_of(&b) else { continue };
             self.running_fixes.insert(b.clone(), f.clone());
             self.running.insert(b.clone(), Entry { base: head.clone(), head: head.clone(), queued_at: f.queued_at,
-                                                   model: None, attempts: 0, request: None });
+                                                   model: None, attempts: 0, request: None, whole: false });
             return Some((b, f, head));
         }
     }
@@ -224,7 +227,7 @@ impl Queue {
 mod tests {
     use super::*;
     fn ent(base: &str, head: &str) -> Entry {
-        Entry { base: base.into(), head: head.into(), queued_at: 0, model: None, attempts: 0, request: None }
+        Entry { base: base.into(), head: head.into(), queued_at: 0, model: None, attempts: 0, request: None, whole: false }
     }
     #[test] fn now_reviews_the_whole_branch_even_while_it_runs() {
         let mut q = Queue::default();
@@ -233,6 +236,13 @@ mod tests {
         q.push_now("feat/x", "m", "h", Some("sonnet".into()), None);
         let e = &q.entries["feat/x"];
         assert_eq!((e.base.as_str(), e.head.as_str(), e.model.as_deref(), e.queued_at), ("m", "h", Some("sonnet"), 0));
+    }
+    #[test] fn only_now_marks_an_entry_whole() {
+        let mut q = Queue::default();
+        q.push("feat/x", "a", "b", 100, &|_, _| true);
+        assert!(!q.entries["feat/x"].whole);
+        q.push_now("feat/x", "m", "b", None, None);
+        assert!(q.entries["feat/x"].whole);
     }
     #[test] fn now_replaces_a_pending_incremental_range() {
         let mut q = Queue::default();
