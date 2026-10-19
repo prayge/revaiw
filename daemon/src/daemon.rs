@@ -455,7 +455,13 @@ pub fn run(repo: Repo) {
 }
 
 fn enqueue(repo: &Repo, cfg: &Config, q: &mut Queue, b: &str, old: Option<&str>, sha: &str, t: u64) {
-    let Some(base) = repo.range(old, sha, &cfg.branches.base) else { log!("{b}: no range, skipped"); return };
+    let Some(mut base) = repo.range(old, sha, &cfg.branches.base) else { log!("{b}: no range, skipped"); return };
+    // Code merged in from another branch was reviewed there: review from the merge (spec C1).
+    if let Some((m, via)) = old.filter(|o| *o == base).and_then(|o| repo.merged_in(o, sha, b)) {
+        if m == sha { log!("{b}: only merges {via} @{}, already reviewed there; skipped", &sha[..7]); return; }
+        log!("{b}: reviewing from merge {} ({via}'s code was reviewed there)", &m[..7]);
+        base = m;
+    }
     let files = repo.numstat(&base, sha);
     if files.iter().all(|(_, _, p)| filter::is_generated(cfg, p)) { log!("{b}: nothing reviewable (empty or generated-only), skipped"); return; }
     q.push(b, &base, sha, t, &|a, b| repo.is_ancestor(a, b));
