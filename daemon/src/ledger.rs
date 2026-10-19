@@ -48,6 +48,30 @@ pub fn demote_outside(out: &mut ReviewOutput, changed: &std::collections::HashSe
     }
 }
 
+/// Decisions already made on any branch (spec C3): dismissed or deferred findings with a reason, from every ledger
+/// under `reviews` (`.reviews/<branch>/ledger.json`, branch names nest), for `files`. A ruling made on one branch
+/// then holds on the branch it merges into. At most 30, deduped by file and summary.
+pub fn settled(reviews: &Path, files: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    let mut stack = vec![reviews.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() { stack.push(p); continue; }
+            if p.file_name().is_none_or(|n| n != "ledger.json") { continue; }
+            for e in Ledger::load(&p).findings.values() {
+                let Some(why) = e.decision_reason.as_deref() else { continue };
+                if !matches!(e.status.as_str(), "dismissed" | "deferred") || !files.contains(&e.f.file) { continue; }
+                let line = format!("- `{}:{}` {} — {}: {why}", e.f.file, e.f.line, e.f.summary, e.status);
+                if !out.iter().any(|l| l.starts_with(&format!("- `{}:", e.f.file)) && l.contains(&e.f.summary)) { out.push(line); }
+            }
+        }
+    }
+    out.truncate(30);
+    out
+}
+
 /// FNV-1a over file + normalised summary, so a re-reported issue lands on the same entry.
 pub fn finding_id(f: &Finding) -> String {
     let norm: String = f.summary.to_lowercase().split_whitespace().collect::<Vec<_>>().join(" ");
@@ -336,5 +360,20 @@ mod tests {
         l.mark_fixed(&ids, "revaiw fix abc1234", "abc1234");
         assert_eq!(l.findings[&ids[0]].status, "fixed");
         assert_eq!(l.findings[&ids[1]].status, "dismissed");
+    }
+    #[test] fn settled_reads_nested_ledgers_and_skips_garbage() {
+        let d = tempfile::tempdir().unwrap();
+        let mut l = Ledger::default();
+        let out = ReviewOutput { findings: vec![fnd("a.ts", "x can be null"), fnd("b.ts", "y")], ..Default::default() };
+        l.merge(&out, "s1");
+        let ids: Vec<String> = l.findings.keys().cloned().collect();
+        for id in &ids { l.dismiss(id, "by design"); }
+        l.save(&d.path().join("feat/x/ledger.json"));
+        std::fs::create_dir_all(d.path().join("bad")).unwrap();
+        std::fs::write(d.path().join("bad/ledger.json"), "not json").unwrap();
+        let got = settled(d.path(), &["a.ts".to_string()]);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert!(got[0].contains("a.ts") && got[0].contains("x can be null") && got[0].contains("by design"), "{got:?}");
+        assert!(settled(&d.path().join("missing"), &["a.ts".to_string()]).is_empty());
     }
 }

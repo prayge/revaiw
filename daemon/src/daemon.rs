@@ -535,8 +535,10 @@ fn start(repo: &Repo, cfg: &Config, b: &str, e: Entry) -> Option<Job> {
 /// Stage 1: `/code-review` at the routed level, guided by REVIEW.md, the diff's skills, a mention's request and any
 /// check results.
 fn start_engine(repo: &Repo, cfg: &Config, b: &str, e: Entry, route: Route, wt: PathBuf, checks: String) -> Option<Job> {
+    let files = repo.files_at_head(&e.base, &e.head);
     let guidance = fs::read_to_string(wt.join("REVIEW.md")).unwrap_or_default()
-        + &review::skill_guidance(cfg, &repo.files_at_head(&e.base, &e.head))
+        + &review::skill_guidance(cfg, &files)
+        + &settled_guidance(repo, b, &files)
         + &e.request.as_ref().map(review::request_block).unwrap_or_default()
         + &review::checks_block(&checks);
     let out = state_dir(repo).join("runs").join(format!("{}-engine.json", run_tag(b, &e.head)));
@@ -568,6 +570,7 @@ fn advance(repo: &Repo, cfg: &Config, q: &mut Queue, st: &mut Status, j: Job, t:
             let prompt = review::format_prompt(&j.branch, &j.entry.base, &j.entry.head, findings.as_deref(), &answer, &files,
                                                &ledger.to_check(), follow_up(&ledger, &j.entry));
             let guidance = fs::read_to_string(wt.join("REVIEW.md")).unwrap_or_default()
+                + &settled_guidance(repo, &j.branch, &files)
                 + &j.entry.request.as_ref().map(review::request_block).unwrap_or_default();
             let out = state_dir(repo).join("runs").join(format!("{}-format.json", run_tag(&j.branch, &j.entry.head)));
             if let Some(child) = spawn(review::format_command(&wt, &prompt, &guidance, &cfg.models.small), &out, &j.branch) {
@@ -815,6 +818,22 @@ fn finish_fix(repo: &Repo, cfg: &Config, q: &mut Queue, st: &mut Status, j: Job,
     q.finish(&j.branch);
     cleanup(repo, &u);
     cleanup(repo, &c);
+}
+
+/// The settled-decisions guidance for a review (spec C3). The PR's Rulings count only from a writer; a failed lookup
+/// leaves them out and the review still runs.
+fn settled_guidance(repo: &Repo, b: &str, files: &[String]) -> String {
+    let lines = crate::ledger::settled(&repo.root.join(".reviews"), files);
+    let rulings = github::posting_enabled().then(|| github::pr_body_author(b)).flatten().and_then(|(author, body)| {
+        let r = github::rulings_section(&body)?;
+        let slug = github::repo_slug()?;
+        match github::permission(&slug, &author) {
+            Ok(p) if crate::mention::can_trigger(p.trim()) => Some(r),
+            Ok(_) => { log!("{b}: Rulings by @{author} ignored: no write permission"); None }
+            Err(e) => { log!("{b}: Rulings left out: permission lookup failed: {e}"); None }
+        }
+    });
+    review::settled_block(&lines, rulings.as_deref())
 }
 
 /// A pinned `revaiw now` asks for a second opinion, so it is never a nits-free follow-up.
