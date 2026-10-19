@@ -360,9 +360,13 @@ pub fn run(repo: Repo) {
             w.polled = t;
             match github::ci_runs(&w.head).map(|r| github::ci_state(&r)) {
                 Some(github::CiState::Failed(runs)) => {
-                    let failures = runs.iter().map(|r| (r.name.clone(), github::failed_log(r.id))).collect();
-                    log!("{b}: {} CI run(s) failed on {}", runs.len(), &w.head[..7]);
-                    ci_due.push(CiJob { branch: b.clone(), head: w.head.clone(), failures });
+                    let failures: Vec<(String, String)> = runs.iter().map(|r| (r.name.clone(), github::failed_log(r.id))).collect();
+                    if ci_logs_all_empty(&failures) {
+                        announce(&repo, b, &ci_no_logs(b, &w.head, w.pr), w.pr);
+                    } else {
+                        log!("{b}: {} CI run(s) failed on {}", runs.len(), &w.head[..7]);
+                        ci_due.push(CiJob { branch: b.clone(), head: w.head.clone(), failures });
+                    }
                     w.since = 0; // done
                 }
                 Some(github::CiState::Skipped) => {
@@ -1050,6 +1054,18 @@ fn ci_verdict(branch: &str, head: &str, pr: Option<u64>, important: usize, refus
     }
 }
 
+/// Every failed run's log is blank: GitHub could not run the jobs (billing, an outage), so there is nothing to
+/// diagnose (spec C6).
+fn ci_logs_all_empty(failures: &[(String, String)]) -> bool {
+    !failures.is_empty() && failures.iter().all(|(_, log)| log.trim().is_empty())
+}
+
+/// Matches review-watch's "<b>: … failed …" row.
+fn ci_no_logs(branch: &str, head: &str, pr: Option<u64>) -> String {
+    format!("{branch}: CI failed @{}{} with no logs (Actions infrastructure?), not diagnosed", &head[..7],
+            pr.map(|n| format!(" #{n}")).unwrap_or_default())
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -1097,6 +1113,16 @@ mod tests {
         assert_eq!(super::next_config(&good, loaded(Config::default(), Some("no HEAD"), false)).0, good);
         // File deleted on a readable trunk: no error, defaults are the repo's.
         assert_eq!(super::next_config(&good, loaded(Config::default(), None, true)).0, Config::default());
+    }
+    #[test] fn ci_logs_all_empty_only_when_every_log_is_blank() {
+        let f = |logs: &[&str]| logs.iter().map(|l| ("check".to_string(), l.to_string())).collect::<Vec<_>>();
+        assert!(super::ci_logs_all_empty(&f(&["", "  \n"])));
+        assert!(!super::ci_logs_all_empty(&f(&["", "FAIL a.test.ts"])));
+        assert!(!super::ci_logs_all_empty(&[]), "no runs is not an outage");
+    }
+    #[test] fn an_empty_log_line_names_its_pr_and_reads_as_failed() {
+        let l = super::ci_no_logs("feat/x", "abcdef1234", Some(7));
+        assert_eq!(l, "feat/x: CI failed @abcdef1 #7 with no logs (Actions infrastructure?), not diagnosed");
     }
     #[test]
     fn a_ci_verdict_names_its_pr_after_the_commit() {
