@@ -846,7 +846,7 @@ fn settled_guidance(repo: &Repo, b: &str, files: &[String]) -> String {
     let rulings = github::posting_enabled().then(|| match github::pr_body_author(b) {
         Ok(Some((author, body))) => {
             let r = github::rulings_section(&body)?;
-            let slug = github::repo_slug()?;
+            let Some(slug) = github::repo_slug() else { log!("{b}: Rulings left out: no repo slug"); return None };
             rulings_if_writer(r, github::permission(&slug, &author))
                 .map_err(|why| log!("{b}: Rulings by @{author} left out: {why}")).ok()
         }
