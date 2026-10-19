@@ -48,7 +48,7 @@ Monitor  command: revaiw watch <branch>
 
 ## Limits
 
-- **Round cap:** at most **5 fix-and-push rounds** per PR without the user. If importants keep coming back,
+- **Round cap:** at most **3 fix-and-push rounds** per PR without the user. If importants keep coming back,
   stop and show the user the remaining findings. Follow-up reviews report only important findings, so a clean
   branch converges.
 - **Branch scope:** push fixes only to this conversation's own branch. Never push to the repo's base branch (`branches.base` in `.review/config.toml`) unless the user says so.
