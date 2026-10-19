@@ -16,6 +16,10 @@ Procedure:
 7. Return the structured output.
 
 Output rules:
+- Severity: a finding is important only when it names a concrete trigger reachable from real inputs on a path that
+  is live today, and says what goes wrong. Defensive checks, unreachable or dormant paths (an unused plan, an unset
+  field, a disabled feature, input the provider cannot send) and failures that need an unlikely chain of events are
+  nits.
 - `line` and `end_line` are line numbers in the file at the reviewed commit.
 - `snippet`: at most 8 lines of the offending code; `lang` is its fence language.
 - `suggestion`: only for a small mechanical fix: the exact replacement text for `line..end_line`.

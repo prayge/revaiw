@@ -48,6 +48,38 @@ pub fn demote_outside(out: &mut ReviewOutput, changed: &std::collections::HashSe
     }
 }
 
+/// Decisions already made on any branch (spec C3): dismissed or deferred findings with a reason, from every ledger
+/// under `reviews` (`.reviews/<branch>/ledger.json`, branch names nest), for `files`. A ruling made on one branch
+/// then holds on the branch it merges into. At most 30, deduped by file and summary, one line each (whitespace collapsed).
+pub fn settled(reviews: &Path, files: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    let mut seen = std::collections::HashSet::new();
+    let mut stack = vec![reviews.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        let mut entries: Vec<_> = rd.flatten().collect();
+        entries.sort_by_key(|e| e.path());
+        let mut subdirs = vec![];
+        for de in entries {
+            let Ok(ft) = de.file_type() else { continue };
+            let p = de.path();
+            if ft.is_dir() { subdirs.push(p); continue; }
+            if !ft.is_file() || p.file_name().is_none_or(|n| n != "ledger.json") { continue; }
+            for e in Ledger::load(&p).findings.values() {
+                let Some(why) = e.decision_reason.as_deref() else { continue };
+                if !matches!(e.status.as_str(), "dismissed" | "deferred") || !files.contains(&e.f.file) { continue; }
+                let flat = |t: &str| t.split_whitespace().collect::<Vec<_>>().join(" ");
+                if seen.insert((e.f.file.clone(), flat(&e.f.summary.to_lowercase()))) {
+                    out.push(format!("- `{}:{}` {} — {}: {}", e.f.file, e.f.line, flat(&e.f.summary), e.status, flat(why)));
+                    if out.len() == 30 { return out; }
+                }
+            }
+        }
+        stack.extend(subdirs.into_iter().rev());
+    }
+    out
+}
+
 /// FNV-1a over file + normalised summary, so a re-reported issue lands on the same entry.
 pub fn finding_id(f: &Finding) -> String {
     let norm: String = f.summary.to_lowercase().split_whitespace().collect::<Vec<_>>().join(" ");
@@ -73,6 +105,12 @@ impl Ledger {
     /// after a clean review gets a full review, nits included.
     pub fn follow_up(&self) -> bool {
         !self.to_check().is_empty()
+    }
+
+    /// A fix of an important finding is under way: one is open or parked as `recheck`. Routing reads this, not
+    /// `follow_up`: new work on a risky path after a review that left only nits still gets the large model.
+    pub fn fixing(&self) -> bool {
+        self.to_check().iter().any(|(_, e)| e.f.severity == "important")
     }
 
     /// The PR comments of findings settled in the ledger (fixed, dismissed): their threads get resolved. Deferred
@@ -284,6 +322,15 @@ mod tests {
         l.merge(&ReviewOutput { findings: vec![fnd("a.ts", "bug")], ..Default::default() }, "b");
         assert!(l.follow_up());
     }
+    #[test] fn fixing_only_while_an_important_finding_is_open_or_rechecked() {
+        let mut l = Ledger::default();
+        l.merge(&ReviewOutput { findings: vec![Finding { severity: "nit".into(), ..fnd("a.ts", "style") }], ..Default::default() }, "a");
+        assert!(l.follow_up() && !l.fixing(), "open nits alone are not a fix in progress");
+        l.merge(&ReviewOutput { findings: vec![fnd("a.ts", "bug")], ..Default::default() }, "b");
+        assert!(l.fixing());
+        for e in l.findings.values_mut() { e.status = if e.f.severity == "nit" { "open" } else { "recheck" }.into(); }
+        assert!(l.fixing(), "a parked recheck is still being fixed");
+    }
     #[test] fn follow_up_reviews_keep_only_important() {
         let mut l = Ledger::default();
         let mut first = ReviewOutput { findings: vec![fnd("a.ts", "bug"), Finding { severity: "nit".into(), ..fnd("a.ts", "style") }],
@@ -336,5 +383,66 @@ mod tests {
         l.mark_fixed(&ids, "revaiw fix abc1234", "abc1234");
         assert_eq!(l.findings[&ids[0]].status, "fixed");
         assert_eq!(l.findings[&ids[1]].status, "dismissed");
+    }
+    #[test] fn settled_reads_nested_ledgers_and_skips_garbage() {
+        let d = tempfile::tempdir().unwrap();
+        let mut l = Ledger::default();
+        let out = ReviewOutput { findings: vec![fnd("a.ts", "x can be null"), fnd("b.ts", "y")], ..Default::default() };
+        l.merge(&out, "s1");
+        let ids: Vec<String> = l.findings.keys().cloned().collect();
+        for id in &ids { l.dismiss(id, "by design"); }
+        l.save(&d.path().join("feat/x/ledger.json"));
+        std::fs::create_dir_all(d.path().join("bad")).unwrap();
+        std::fs::write(d.path().join("bad/ledger.json"), "not json").unwrap();
+        let got = settled(d.path(), &["a.ts".to_string()]);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert!(got[0].contains("a.ts") && got[0].contains("x can be null") && got[0].contains("by design"), "{got:?}");
+        assert!(settled(&d.path().join("missing"), &["a.ts".to_string()]).is_empty());
+    }
+    fn decided(l: &mut Ledger, f: Finding, status: &str, why: Option<&str>) {
+        let id = finding_id(&f);
+        l.merge(&ReviewOutput { findings: vec![f], ..Default::default() }, "s1");
+        let e = l.findings.get_mut(&id).unwrap();
+        e.status = status.into();
+        e.decision_reason = why.map(Into::into);
+    }
+    #[test] fn settled_keeps_distinct_rulings_includes_deferred_and_needs_a_reason() {
+        let d = tempfile::tempdir().unwrap();
+        let mut l = Ledger::default();
+        decided(&mut l, fnd("a.ts", "y"), "dismissed", Some("by design"));
+        decided(&mut l, fnd("a.ts", "z"), "deferred", Some("why y matters later"));
+        decided(&mut l, fnd("a.ts", "no reason"), "dismissed", None);
+        decided(&mut l, fnd("a.ts", "still open"), "open", Some("r"));
+        l.save(&d.path().join("one/ledger.json"));
+        let mut m = Ledger::default();
+        decided(&mut m, fnd("a.ts", "Y "), "dismissed", Some("other branch"));
+        m.save(&d.path().join("two/ledger.json"));
+        let got = settled(d.path(), &["a.ts".to_string()]);
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert!(got.iter().any(|g| g.contains("`a.ts:1` y ") && g.contains("dismissed")), "{got:?}");
+        assert!(got.iter().any(|g| g.contains(" z ") && g.contains("deferred")), "{got:?}");
+    }
+    #[test] fn a_multi_line_summary_or_reason_stays_on_its_settled_line() {
+        let d = tempfile::tempdir().unwrap();
+        let mut l = Ledger::default();
+        decided(&mut l, fnd("a.ts", "x can\n  be null"), "dismissed", Some("by\n\ndesign\t here"));
+        l.save(&d.path().join("b/ledger.json"));
+        assert_eq!(settled(d.path(), &["a.ts".to_string()]), vec!["- `a.ts:1` x can be null — dismissed: by design here".to_string()]);
+    }
+    #[test] fn settled_stops_at_thirty() {
+        let d = tempfile::tempdir().unwrap();
+        let mut l = Ledger::default();
+        for i in 0..40 { decided(&mut l, fnd("a.ts", &format!("finding {i}")), "dismissed", Some("r")); }
+        l.save(&d.path().join("b/ledger.json"));
+        assert_eq!(settled(d.path(), &["a.ts".to_string()]).len(), 30);
+    }
+    #[test] fn settled_does_not_follow_symlinks() {
+        let d = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let mut l = Ledger::default();
+        decided(&mut l, fnd("a.ts", "x"), "dismissed", Some("r"));
+        l.save(&outside.path().join("ledger.json"));
+        std::os::unix::fs::symlink(outside.path(), d.path().join("link")).unwrap();
+        assert!(settled(d.path(), &["a.ts".to_string()]).is_empty());
     }
 }

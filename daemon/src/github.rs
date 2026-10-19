@@ -192,8 +192,9 @@ pub fn log_tail(log: &str, lines: usize, max: usize) -> String {
     t
 }
 
-pub fn failed_log(run_id: u64) -> String {
-    log_tail(&gh(&["run", "view", &run_id.to_string(), "--log-failed"], None).unwrap_or_default(), 150, 12_000)
+/// None when gh fails: that is no answer, not an empty log (which reads as an Actions outage, spec C6).
+pub fn failed_log(run_id: u64) -> Option<String> {
+    gh(&["run", "view", &run_id.to_string(), "--log-failed"], None).ok().map(|l| log_tail(&l, 150, 12_000))
 }
 
 /// Commit status for the PR's checks list, posted only when a review completes, and always "success" with the
@@ -372,6 +373,30 @@ pub fn open_prs() -> Result<Vec<(String, Pr)>, String> {
     Ok(parse_open_prs(&out))
 }
 
+/// The open same-repo PR's author and body, for its `## Rulings` (spec C3). `Ok(None)` when the branch has no open PR.
+pub fn pr_body_author(branch: &str) -> Result<Option<(String, String)>, String> {
+    let out = gh(&["pr", "list", "--head", branch, "--state", "open", "--json", "author,body,isCrossRepository",
+                   "--limit", "10"], None)?;
+    parse_pr_body_author(&out)
+}
+
+/// A fork's PR can share our branch's name and its body is the fork author's to write, so only same-repo PRs count.
+fn parse_pr_body_author(json: &str) -> Result<Option<(String, String)>, String> {
+    let v: Value = serde_json::from_str(json).map_err(|e| format!("gh pr list: {e}"))?;
+    Ok(v.as_array().into_iter().flatten().filter(|p| p["isCrossRepository"].as_bool() == Some(false))
+        .find_map(|p| Some((p["author"]["login"].as_str()?.to_string(), p["body"].as_str().unwrap_or("").to_string()))))
+}
+
+/// The text under a `## Rulings` heading (any case) up to the next `## ` heading, at most 2000 characters. None when
+/// there is no such section or it is empty.
+pub fn rulings_section(body: &str) -> Option<String> {
+    let mut lines = body.lines().skip_while(|l| !l.trim().eq_ignore_ascii_case("## rulings"));
+    lines.next()?;
+    let text: String = lines.take_while(|l| !l.starts_with("## ")).collect::<Vec<_>>().join("\n");
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.chars().take(2000).collect())
+}
+
 /// Same-repo PRs only: a fork's head branch can share a name with one of ours, and revaiw must never review or
 /// push to ours on the fork's behalf.
 pub fn parse_open_prs(json: &str) -> Vec<(String, Pr)> {
@@ -433,7 +458,7 @@ mod tests {
         use crate::{ledger::Ledger, model::ReviewOutput, render::{summary, Ctx}};
         let (l, out) = (Ledger::default(), ReviewOutput::default());
         let body = |title: &str| summary(&Ctx { title, branch: "b", base: "a", head: "h", model: "m", effort: "e", reason: "r",
-                                                  out: &out, ledger: &l, fixed_now: &[], engine: None });
+                                                  out: &out, ledger: &l, fixed_now: &[], engine: None, follow_up: false });
         assert!(is_ci_comment(&body("🧪 CI failures")));
         assert!(!is_ci_comment(&body("🐇 Review")));
     }
@@ -543,5 +568,21 @@ mod tests {
         let prs = parse_open_prs(json);
         assert_eq!(prs.iter().map(|(b, p)| (b.as_str(), p.number, p.base.as_str())).collect::<Vec<_>>(),
                    vec![("feat/x", 7, "main")], "a fork's same-named branch is not ours");
+    }
+    #[test] fn rulings_section_runs_to_the_next_heading_or_the_end() {
+        let b = "## Summary\nx\n## Rulings\n- one bad runner refuses the card\n\n## Test plan\ny";
+        assert_eq!(rulings_section(b).as_deref(), Some("- one bad runner refuses the card"));
+        assert_eq!(rulings_section("## rulings\nlast").as_deref(), Some("last"));
+        assert_eq!(rulings_section("## Summary\nno rulings here"), None);
+        assert_eq!(rulings_section("## Rulings\n\n## Next"), None, "an empty section is none");
+        assert!(rulings_section(&format!("## Rulings\n{}", "x".repeat(5000))).unwrap().chars().count() <= 2000);
+    }
+    #[test] fn pr_body_author_takes_the_first_same_repo_pr() {
+        let json = r###"[{"author":{"login":"fork"},"body":"f","isCrossRepository":true},
+                       {"author":{"login":"kim"},"body":"## Rulings\nx","isCrossRepository":false}]"###;
+        assert_eq!(parse_pr_body_author(json), Ok(Some(("kim".into(), "## Rulings\nx".into()))));
+        assert_eq!(parse_pr_body_author(r#"[{"author":{"login":"fork"},"body":"f","isCrossRepository":true}]"#), Ok(None));
+        assert_eq!(parse_pr_body_author("[]"), Ok(None));
+        assert!(parse_pr_body_author("not json").is_err());
     }
 }

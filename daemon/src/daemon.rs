@@ -74,7 +74,7 @@ enum Kind {
     FixChecks,
 }
 
-/// A reviewed head whose GitHub Actions runs are awaited; failures become a CI job.
+/// A reviewed head (or a merge-only push of reviewed code) whose GitHub Actions runs are awaited; failures become a CI job.
 struct CiWatch {
     head: String,
     /// Already told the conversation this head's CI is skipped (draft); keep polling for real runs.
@@ -207,6 +207,8 @@ pub fn run(repo: Repo) {
     };
     let mut jobs: Vec<Job> = vec![];
     let mut watches: std::collections::BTreeMap<String, CiWatch> = Default::default();
+    // Merge-only heads pushed while their branch's review ran: that review's verdict is for them.
+    let mut merged_behind: std::collections::BTreeMap<String, String> = Default::default();
     let mut ci_due: Vec<CiJob> = vec![];
     // Fixes whose engine is done and change is guarded, waiting for the resource guard to allow their checks child.
     let mut pending_checks: Vec<Job> = vec![];
@@ -246,7 +248,11 @@ pub fn run(repo: Repo) {
           if let Some(next) = repo.snapshot() {
             for (b, sha) in &next {
                 if snap.get(b) == Some(sha) || filter::skip_branch(&cfg, b) || !cfg.triggers.push { continue; }
-                enqueue(&repo, &cfg, &mut q, b, snap.get(b).map(String::as_str), sha, t);
+                let e = enqueue(&repo, &cfg, &mut q, b, snap.get(b).map(String::as_str), sha, t);
+                note_merge(&mut merged_behind, b, sha, &e);
+                if e == Enqueued::MergedOnly {
+                    if let Some(w) = merged_only_watch(&repo, &cfg, b, sha, t) { watches.insert(b.clone(), w); }
+                }
                 changed = true;
             }
             for b in snap.keys().filter(|b| !next.contains_key(*b)) { q.remove(b); changed = true; }
@@ -258,7 +264,11 @@ pub fn run(repo: Repo) {
             for (b, tier) in body.lines().map(route::parse_now_line).filter(|(b, _)| !b.is_empty()) {
                 let tier = tier.unwrap_or_else(|t| { log!("now: unknown model {t} for {b}, routing by size"); None });
                 match snap.get(&b) {
-                    Some(sha) => { let sha = sha.clone(); changed |= enqueue_now(&repo, &cfg, &mut q, &b, &sha, tier, None); }
+                    Some(sha) => {
+                        let sha = sha.clone();
+                        merged_behind.remove(&b);
+                        changed |= enqueue_now(&repo, &cfg, &mut q, &b, &sha, tier, None);
+                    }
                     None => log!("now: no remote branch {b}"),
                 }
             }
@@ -277,6 +287,7 @@ pub fn run(repo: Repo) {
                         let dropped = match snap.get(&branch) {
                             Some(sha) => {
                                 let sha = sha.clone();
+                                merged_behind.remove(&branch);
                                 log!("{branch}: review requested by @{} (#{id})", request.login);
                                 if enqueue_now(&repo, &cfg, &mut q, &branch, &sha, model, Some(request)) { None }
                                 else { Some("nothing reviewable in the range") }
@@ -332,8 +343,9 @@ pub fn run(repo: Repo) {
                             pending_checks.push(next);
                         },
                         Kind::FixChecks => fix_checks_done(&repo, &cfg, &mut q, &mut st, j, status),
-                        Kind::Review | Kind::Ci => if let Some((b, w)) = finish(&repo, &cfg, &mut q, &mut st, &mut ci_due, j, t) {
-                            watches.insert(b, w);
+                        Kind::Review | Kind::Ci => if let Some((b, mut w, ci)) = finish(&repo, &cfg, &mut q, &mut st, &mut ci_due, j, t) {
+                            w.head = verdict_head(&w.head, merged_behind.remove(&b), &|a, b| repo.is_ancestor(a, b));
+                            if let Some(w) = watch_or_verdict(&repo, &b, w, ci) { watches.insert(b, w); }
                         },
                     }
                     changed = true;
@@ -341,6 +353,8 @@ pub fn run(repo: Repo) {
                 _ => i += 1,
             }
         }
+
+        forget_ended_merges(&mut merged_behind, &q);
 
         // A checks child is a job like any other: it starts only when the resource guard allows (spec §5.4.4). Until
         // then (or while the guard cannot be read) the fix waits here with U, C and its harvested files intact.
@@ -360,9 +374,14 @@ pub fn run(repo: Repo) {
             w.polled = t;
             match github::ci_runs(&w.head).map(|r| github::ci_state(&r)) {
                 Some(github::CiState::Failed(runs)) => {
-                    let failures = runs.iter().map(|r| (r.name.clone(), github::failed_log(r.id))).collect();
-                    log!("{b}: {} CI run(s) failed on {}", runs.len(), &w.head[..7]);
-                    ci_due.push(CiJob { branch: b.clone(), head: w.head.clone(), failures });
+                    let logs: Vec<(String, Option<String>)> = runs.iter().map(|r| (r.name.clone(), github::failed_log(r.id))).collect();
+                    if ci_logs_all_empty(&logs) {
+                        announce(&repo, b, &ci_no_logs(b, &w.head, w.pr), w.pr);
+                    } else {
+                        log!("{b}: {} CI run(s) failed on {}", runs.len(), &w.head[..7]);
+                        let failures = logs.into_iter().map(|(n, l)| (n, l.unwrap_or_default())).collect();
+                        ci_due.push(CiJob { branch: b.clone(), head: w.head.clone(), failures });
+                    }
                     w.since = 0; // done
                 }
                 Some(github::CiState::Skipped) => {
@@ -373,7 +392,7 @@ pub fn run(repo: Repo) {
                     }
                 }
                 Some(github::CiState::Passed) => {
-                    // A watch only exists once its head's review is recorded (finish), so the count is always known.
+                    // A watch only exists once its head's review state is known (finish, or a merge-only push), so the count is always known.
                     announce(&repo, b, &ci_verdict(b, &w.head, w.pr, w.important, w.refused), w.pr);
                     w.since = 0;
                 }
@@ -454,11 +473,41 @@ pub fn run(repo: Repo) {
     }
 }
 
-fn enqueue(repo: &Repo, cfg: &Config, q: &mut Queue, b: &str, old: Option<&str>, sha: &str, t: u64) {
-    let Some(base) = repo.range(old, sha, &cfg.branches.base) else { log!("{b}: no range, skipped"); return };
+/// What `enqueue` did with a push. `MergedOnly`: a merge of reviewed code, not reviewed; its head gets its CI verdict
+/// now. `MergedBehindRun`: the same while the branch's review of an earlier head runs; that review's verdict is for
+/// this head (`verdict_head`), since its counts are the fresh ones.
+#[derive(Debug, PartialEq)]
+enum Enqueued { Queued, Skipped, MergedOnly, MergedBehindRun }
+
+fn enqueue(repo: &Repo, cfg: &Config, q: &mut Queue, b: &str, old: Option<&str>, sha: &str, t: u64) -> Enqueued {
+    let Some(mut base) = repo.range(old, sha, &cfg.branches.base) else { log!("{b}: no range, skipped"); return Enqueued::Skipped };
+    // Code merged in from another branch was reviewed there: review from the merge (spec C1). Not onto a pending
+    // review: its range still holds this branch's own unreviewed commits, so it keeps its base and moves to `sha`.
+    let pending = q.entries.contains_key(b);
+    if let Some((m, via)) = old.filter(|o| *o == base && !pending).and_then(|o| repo.merged_in(o, sha, b)) {
+        // A review (not a fix) of this branch running now covers its earlier commits, even a first one.
+        let review = q.running.get(b).filter(|_| !q.running_fixes.contains_key(b));
+        if m == sha && review.is_some_and(|r| repo.is_ancestor(&r.head, sha)) {
+            log!("{b}: only merges {via} @{}, already reviewed there; skipped", &sha[..7]);
+            return Enqueued::MergedBehindRun;
+        }
+        if review.is_none() && Ledger::load(&ledger_path(repo, b)).reviews == 0 {
+            // Nothing of this branch was reviewed yet (pushed before the daemon ran): a ✅ must not come from an
+            // empty ledger, nor its earlier commits go unreviewed, so the branch gets its first review.
+            log!("{b}: merges {via} @{}, but the branch has no review yet; reviewing all of it", &m[..7]);
+            if let Some(whole) = repo.range(None, sha, &cfg.branches.base) { base = whole; }
+        } else if m != sha {
+            log!("{b}: reviewing from merge {} ({via}'s code was reviewed there)", &m[..7]);
+            base = m;
+        } else {
+            log!("{b}: only merges {via} @{}, already reviewed there; skipped", &sha[..7]);
+            return Enqueued::MergedOnly;
+        }
+    }
     let files = repo.numstat(&base, sha);
-    if files.iter().all(|(_, _, p)| filter::is_generated(cfg, p)) { log!("{b}: nothing reviewable (empty or generated-only), skipped"); return; }
+    if files.iter().all(|(_, _, p)| filter::is_generated(cfg, p)) { log!("{b}: nothing reviewable (empty or generated-only), skipped"); return Enqueued::Skipped; }
     q.push(b, &base, sha, t, &|a, b| repo.is_ancestor(a, b));
+    Enqueued::Queued
 }
 
 /// `revaiw now`: the whole branch against the base branch, whatever is pending or running. False when nothing is
@@ -504,8 +553,9 @@ fn run_tag(b: &str, head: &str) -> String {
 /// the engine.
 fn start(repo: &Repo, cfg: &Config, b: &str, e: Entry) -> Option<Job> {
     let files = repo.numstat(&e.base, &e.head);
+    let fu = fixing(&Ledger::load(&ledger_path(repo, b)), &e);
     let route = e.model.as_deref().and_then(|t| route::pinned(cfg, t))
-        .unwrap_or_else(|| route::route(cfg, &files, &repo.messages(&e.base, &e.head)));
+        .unwrap_or_else(|| route::route(cfg, &files, &repo.messages(&e.base, &e.head), fu));
     let runs = state_dir(repo).join("runs");
     let wt = runs.join(format!("wt-{}", run_tag(b, &e.head)));
     // Steer files from the trunk, never `e.base`: for a follow-up push that is the PR's own previous commit.
@@ -529,8 +579,10 @@ fn start(repo: &Repo, cfg: &Config, b: &str, e: Entry) -> Option<Job> {
 /// Stage 1: `/code-review` at the routed level, guided by REVIEW.md, the diff's skills, a mention's request and any
 /// check results.
 fn start_engine(repo: &Repo, cfg: &Config, b: &str, e: Entry, route: Route, wt: PathBuf, checks: String) -> Option<Job> {
+    let files = repo.files_at_head(&e.base, &e.head);
     let guidance = fs::read_to_string(wt.join("REVIEW.md")).unwrap_or_default()
-        + &review::skill_guidance(cfg, &repo.files_at_head(&e.base, &e.head))
+        + &review::skill_guidance(cfg, &files)
+        + &settled_guidance(repo, b, &files)
         + &e.request.as_ref().map(review::request_block).unwrap_or_default()
         + &review::checks_block(&checks);
     let out = state_dir(repo).join("runs").join(format!("{}-engine.json", run_tag(b, &e.head)));
@@ -562,6 +614,7 @@ fn advance(repo: &Repo, cfg: &Config, q: &mut Queue, st: &mut Status, j: Job, t:
             let prompt = review::format_prompt(&j.branch, &j.entry.base, &j.entry.head, findings.as_deref(), &answer, &files,
                                                &ledger.to_check(), follow_up(&ledger, &j.entry));
             let guidance = fs::read_to_string(wt.join("REVIEW.md")).unwrap_or_default()
+                + &settled_guidance(repo, &j.branch, &files)
                 + &j.entry.request.as_ref().map(review::request_block).unwrap_or_default();
             let out = state_dir(repo).join("runs").join(format!("{}-format.json", run_tag(&j.branch, &j.entry.head)));
             if let Some(child) = spawn(review::format_command(&wt, &prompt, &guidance, &cfg.models.small), &out, &j.branch) {
@@ -602,7 +655,7 @@ fn start_ci(repo: &Repo, cfg: &Config, c: CiJob) -> Option<Job> {
     let out = runs.join(format!("{}-ci.json", run_tag(&c.branch, &c.head)));
     let Some(child) = spawn(review::ci_command(&wt, &route, &prompt), &out, &c.branch) else { cleanup(repo, &wt); return None };
     log!("ci diagnosis {} @{} on {}", c.branch, &c.head[..7], route.model);
-    let entry = Entry { base: c.head.clone(), head: c.head.clone(), queued_at: 0, model: None, attempts: 0, request: None };
+    let entry = Entry { base: c.head.clone(), head: c.head.clone(), queued_at: 0, model: None, attempts: 0, request: None, whole: false };
     Some(Job { kind: Kind::Ci, branch: c.branch.clone(), entry, route, child, out, ci: Some(c), started: now(),
                worktree: Some(wt), refused: vec![], fix: None })
 }
@@ -681,7 +734,7 @@ fn start_fix(repo: &Repo, cfg: &Config, b: &str, f: FixJob, head: &str) -> Optio
     let cmd = fix::command(&u, &cfg.fix.model, &fix::prompt(b, head, &items));
     let Some(child) = spawn(cmd, &out, b) else { cleanup(repo, &u); return None };
     log!("fix {b} @{} on {} for {} finding(s), requested by @{}", &head[..7], cfg.fix.model, items.len(), f.login);
-    let entry = Entry { base, head: head.into(), queued_at: f.queued_at, model: None, attempts: 0, request: None };
+    let entry = Entry { base, head: head.into(), queued_at: f.queued_at, model: None, attempts: 0, request: None, whole: false };
     let route = Route { model: cfg.fix.model.clone(), effort: "medium", level: "fix", reason: "requested fix".into() };
     Some(Job { kind: Kind::Fix, branch: b.into(), entry, route, child, out, ci: None, started: now(),
                worktree: Some(u), refused: vec![], fix: Some((f, items, vec![])) })
@@ -811,18 +864,52 @@ fn finish_fix(repo: &Repo, cfg: &Config, q: &mut Queue, st: &mut Status, j: Job,
     cleanup(repo, &c);
 }
 
-/// A pinned `revaiw now` asks for a second opinion, so it is never a nits-free follow-up.
+/// The settled-decisions guidance for a review (spec C3). The PR's Rulings count only from a writer; a failed lookup
+/// leaves them out and the review still runs.
+fn settled_guidance(repo: &Repo, b: &str, files: &[String]) -> String {
+    let lines = crate::ledger::settled(&repo.root.join(".reviews"), files);
+    let rulings = github::posting_enabled().then(|| match github::pr_body_author(b) {
+        Ok(Some((author, body))) => {
+            let r = github::rulings_section(&body)?;
+            let Some(slug) = github::repo_slug() else { log!("{b}: Rulings left out: no repo slug"); return None };
+            rulings_if_writer(r, github::permission(&slug, &author))
+                .map_err(|why| log!("{b}: Rulings by @{author} left out: {why}")).ok()
+        }
+        Ok(None) => None,
+        Err(e) => { log!("{b}: Rulings left out: PR lookup failed: {e}"); None }
+    }).flatten();
+    review::settled_block(&lines, rulings.as_deref())
+}
+
+/// The PR's Rulings steer the review only when its author can write to the repo; `Err` carries the reason to log.
+fn rulings_if_writer(rulings: String, permission: Result<String, String>) -> Result<String, String> {
+    match permission {
+        Ok(p) if crate::mention::can_trigger(p.trim()) => Ok(rulings),
+        Ok(p) => Err(format!("no write permission ({})", p.trim())),
+        Err(e) => Err(format!("permission lookup failed: {e}")),
+    }
+}
+
+/// A pinned `revaiw now` asks for a second opinion and an unpinned one (or `@review`) for the whole branch, so
+/// neither is a nits-free follow-up (spec C5: a full review lists them again).
 fn follow_up(ledger: &Ledger, e: &Entry) -> bool {
-    ledger.follow_up() && e.model.is_none()
+    ledger.follow_up() && e.model.is_none() && !e.whole
+}
+
+/// Routing's follow-up flag (a risky path drops to the medium model): only while important findings are being
+/// fixed, and never for a pinned or whole-branch review.
+fn fixing(ledger: &Ledger, e: &Entry) -> bool {
+    ledger.fixing() && e.model.is_none() && !e.whole
 }
 
 fn ledger_path(repo: &Repo, b: &str) -> PathBuf {
     repo.root.join(".reviews").join(b).join("ledger.json")
 }
 
-/// Returns a CI watch for a completed review, so its Actions runs are checked once they finish.
+/// Returns a recorded review's CI watch and whether GitHub CI applies, for `watch_or_verdict` once the caller has
+/// picked the head it is for (`verdict_head`).
 fn finish(repo: &Repo, cfg: &Config, q: &mut Queue, st: &mut Status, ci_due: &mut Vec<CiJob>, mut j: Job, t: u64)
-    -> Option<(String, CiWatch)> {
+    -> Option<(String, CiWatch, bool)> {
     st.running.retain(|r| !(r.branch == j.branch && r.pid == j.child.id()));
     if let Some(wt) = &j.worktree { cleanup(repo, wt); }
     let raw = fs::read_to_string(&j.out).unwrap_or_default();
@@ -840,19 +927,9 @@ fn finish(repo: &Repo, cfg: &Config, q: &mut Queue, st: &mut Status, ci_due: &mu
             if unread > 0 {
                 log!("{}: ⚠️ partial review @{}, /code-review {} (see the review comment)", j.branch, &j.entry.head[..7], o.gaps());
             }
-            if is_review && !ci {
-                if unread > 0 { return None; }
-                // No GitHub CI for this head (not on `ci.branches`, no open PR into `ci.pr_bases`): the review is
-                // the whole remote verdict. Same wording as the CI-green lines below, so review-watch reads it the same way.
-                let at = format!("@{}{}", &j.entry.head[..7], pr.map(|n| format!(" #{n}")).unwrap_or_default());
-                match important {
-                    0 => announce(repo, &j.branch, &format!("{}: ✅ ready to merge {at} (review clean; no GitHub CI for this branch)", j.branch), pr),
-                    n => log!("{}: review done @{}, {n} important still open", j.branch, &j.entry.head[..7]),
-                }
-                return None;
-            }
-            is_review.then(|| (j.branch.clone(), CiWatch { head: j.entry.head.clone(), told_skipped: false, since: t, polled: t,
-                                                          important, refused: unread, pr }))
+            if !is_review { return None; }
+            let w = CiWatch { head: j.entry.head.clone(), told_skipped: false, since: t, polled: t, important, refused: unread, pr };
+            Some((j.branch.clone(), w, ci))
         }
         review::Outcome::UsageLimit(until) => {
             log!("{}: usage limit, paused until {until}", j.branch);
@@ -870,6 +947,47 @@ fn finish(repo: &Repo, cfg: &Config, q: &mut Queue, st: &mut Status, ci_due: &mu
             None
         }
     }
+}
+
+/// `w`, a head whose review state is known: kept to watch its GitHub CI, or, when none applies (not on
+/// `ci.branches`, no open PR into `ci.pr_bases`), the verdict now, since the review is the whole remote verdict. Same
+/// wording as `ci_verdict`, so review-watch reads both the same way. A partial review gets no verdict.
+fn watch_or_verdict(repo: &Repo, b: &str, w: CiWatch, ci: bool) -> Option<CiWatch> {
+    if ci { return Some(w); }
+    if w.refused > 0 { return None; }
+    let at = format!("@{}{}", &w.head[..7], w.pr.map(|n| format!(" #{n}")).unwrap_or_default());
+    match w.important {
+        0 => announce(repo, b, &format!("{b}: ✅ ready to merge {at} (review clean; no GitHub CI for this branch)"), w.pr),
+        n => log!("{b}: review done @{}, {n} important still open", &w.head[..7]),
+    }
+    None
+}
+
+/// A merge-only push (`Enqueued::MergedOnly`) is not reviewed, but its head still gets the CI verdict, from the
+/// branch's open findings as they stand.
+fn merged_only_watch(repo: &Repo, cfg: &Config, b: &str, head: &str, t: u64) -> Option<CiWatch> {
+    let important = Ledger::load(&ledger_path(repo, b)).open().iter().filter(|(_, e)| e.f.severity == "important").count();
+    let pr = github::pr_for(b).map(|p| p.number);
+    let ci = filter::ci_expected_after_lookup(cfg, b, github::open_pr_base(b).as_ref().map(|b| b.as_deref()).map_err(|_| ()));
+    watch_or_verdict(repo, b, CiWatch { head: head.into(), told_skipped: false, since: t, polled: t, important, refused: 0, pr }, ci)
+}
+
+/// Remembers a merge-only head pushed behind a running review (`Enqueued::MergedBehindRun`); any other outcome for
+/// the branch (a newer push, a skip, a `revaiw now`) forgets it, since that review's verdict is no longer for it.
+fn note_merge(behind: &mut std::collections::BTreeMap<String, String>, b: &str, sha: &str, e: &Enqueued) {
+    if *e == Enqueued::MergedBehindRun { behind.insert(b.into(), sha.into()); } else { behind.remove(b); }
+}
+
+/// A remembered merge head lives only while the review it waits on is running or requeued (a usage limit); a review
+/// that ended without a verdict (failed) takes it along.
+fn forget_ended_merges(behind: &mut std::collections::BTreeMap<String, String>, q: &Queue) {
+    behind.retain(|b, _| (q.running.contains_key(b) && !q.running_fixes.contains_key(b)) || q.entries.contains_key(b));
+}
+
+/// The head a finished review's watch or verdict is for: the merge-only push that landed while it ran
+/// (`Enqueued::MergedBehindRun`) when the reviewed head is in it, else the reviewed head.
+fn verdict_head(head: &str, merged: Option<String>, is_ancestor: &dyn Fn(&str, &str) -> bool) -> String {
+    merged.filter(|m| is_ancestor(head, m)).unwrap_or_else(|| head.into())
 }
 
 /// Where a run's time went: push → start (the debounce plus any queue), the CLI run, and the GitHub posting.
@@ -900,7 +1018,8 @@ fn record(repo: &Repo, cfg: &Config, st: &mut Status, j: &Job, o: &crate::model:
     let lp = ledger_path(repo, &j.branch);
     let mut ledger = Ledger::load(&lp);
     let mut o = o.clone();
-    if j.kind == Kind::Review { crate::ledger::converge(follow_up(&ledger, &j.entry), &mut o); }
+    let fu = j.kind == Kind::Review && follow_up(&ledger, &j.entry);
+    if fu { crate::ledger::converge(true, &mut o); }
     if j.kind == Kind::Ci {
         if let Some(base) = repo.range(None, &j.entry.head, &cfg.branches.base) {
             if let Some(changed) = repo.changed_files(&base, &j.entry.head) {
@@ -919,7 +1038,7 @@ fn record(repo: &Repo, cfg: &Config, st: &mut Status, j: &Job, o: &crate::model:
     let body = render::summary(&render::Ctx {
         title, branch: &j.branch, base: &j.entry.base, head: &j.entry.head, model: &j.route.model,
         effort: j.route.effort, reason: &j.route.reason, out: o, ledger: &ledger, fixed_now: &merged.fixed,
-        engine: (j.kind == Kind::Review).then_some(engine.as_str()),
+        engine: (j.kind == Kind::Review).then_some(engine.as_str()), follow_up: fu,
     });
     let suffix = if j.kind == Kind::Ci { "-ci" } else { "" };
     let md = lp.with_file_name(format!("{}{suffix}.md", &j.entry.head[..7]));
@@ -1013,6 +1132,19 @@ fn ci_verdict(branch: &str, head: &str, pr: Option<u64>, important: usize, refus
     }
 }
 
+/// Every failed run has no log: GitHub could not run the jobs (billing, an outage), so there is nothing to diagnose
+/// (spec C6). A fetch that failed (None) counts as no log: a billing-blocked run's jobs have no steps, and
+/// `gh run view --log-failed` on it exits 1 (HTTP 502) rather than printing an empty log.
+fn ci_logs_all_empty(logs: &[(String, Option<String>)]) -> bool {
+    !logs.is_empty() && logs.iter().all(|(_, log)| log.as_deref().is_none_or(|l| l.trim().is_empty()))
+}
+
+/// Matches review-watch's "<b>: … failed …" row.
+fn ci_no_logs(branch: &str, head: &str, pr: Option<u64>) -> String {
+    format!("{branch}: CI failed @{}{} with no logs (Actions infrastructure?), not diagnosed", &head[..7],
+            pr.map(|n| format!(" #{n}")).unwrap_or_default())
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -1060,6 +1192,18 @@ mod tests {
         assert_eq!(super::next_config(&good, loaded(Config::default(), Some("no HEAD"), false)).0, good);
         // File deleted on a readable trunk: no error, defaults are the repo's.
         assert_eq!(super::next_config(&good, loaded(Config::default(), None, true)).0, Config::default());
+    }
+    #[test] fn ci_logs_all_empty_when_every_log_is_blank_or_unfetchable() {
+        let f = |logs: &[Option<&str>]| logs.iter().map(|l| ("check".to_string(), l.map(String::from))).collect::<Vec<_>>();
+        assert!(super::ci_logs_all_empty(&f(&[Some(""), Some("  \n")])));
+        assert!(!super::ci_logs_all_empty(&f(&[Some(""), Some("FAIL a.test.ts")])));
+        assert!(super::ci_logs_all_empty(&f(&[Some(""), None])), "a billing-blocked run's log fetch fails (HTTP 502): no log");
+        assert!(!super::ci_logs_all_empty(&f(&[None, Some("FAIL a.test.ts")])));
+        assert!(!super::ci_logs_all_empty(&[]), "no runs is not an outage");
+    }
+    #[test] fn an_empty_log_line_names_its_pr_and_reads_as_failed() {
+        let l = super::ci_no_logs("feat/x", "abcdef1234", Some(7));
+        assert_eq!(l, "feat/x: CI failed @abcdef1 #7 with no logs (Actions infrastructure?), not diagnosed");
     }
     #[test]
     fn a_ci_verdict_names_its_pr_after_the_commit() {
@@ -1109,9 +1253,25 @@ mod tests {
                           why: "y".into(), snippet: String::new(), lang: String::new(), suggested_patch: None,
                           suggestion: None, on_base: false };
         l.merge(&ReviewOutput { findings: vec![f], ..Default::default() }, "s");
-        let e = Entry { base: "a".into(), head: "b".into(), queued_at: 0, model: None, attempts: 0, request: None };
+        let e = Entry { base: "a".into(), head: "b".into(), queued_at: 0, model: None, attempts: 0, request: None, whole: false };
         assert!(super::follow_up(&l, &e));
-        assert!(!super::follow_up(&l, &Entry { model: Some("sonnet".into()), ..e }));
+        assert!(!super::follow_up(&l, &Entry { model: Some("sonnet".into()), ..e.clone() }));
+        assert!(!super::follow_up(&l, &Entry { whole: true, ..e }), "`now` / @review is a full review");
+    }
+    #[test]
+    fn only_a_fix_in_progress_routes_a_risky_push_off_the_large_model() {
+        use crate::{ledger::Ledger, model::{Finding, ReviewOutput}, queue::Entry};
+        let f = |s: &str| Finding { severity: s.into(), file: "a.ts".into(), line: 1, end_line: None, summary: s.into(),
+                                    why: "y".into(), snippet: String::new(), lang: String::new(), suggested_patch: None,
+                                    suggestion: None, on_base: false };
+        let e = Entry { base: "a".into(), head: "b".into(), queued_at: 0, model: None, attempts: 0, request: None, whole: false };
+        let mut l = Ledger::default();
+        l.merge(&ReviewOutput { findings: vec![f("nit")], ..Default::default() }, "s");
+        assert!(super::follow_up(&l, &e) && !super::fixing(&l, &e), "only nits open: new work gets the large model");
+        l.merge(&ReviewOutput { findings: vec![f("nit"), f("important")], ..Default::default() }, "t");
+        assert!(super::fixing(&l, &e));
+        assert!(!super::fixing(&l, &Entry { whole: true, ..e.clone() }));
+        assert!(!super::fixing(&l, &Entry { model: Some("sonnet".into()), ..e }));
     }
     #[test]
     fn requests_are_taken_by_rename_so_late_appends_survive() {
@@ -1190,5 +1350,154 @@ mod tests {
         let repo = crate::git::Repo { root: "/r".into(), common: "/r/.git".into(), remote: "origin".into() };
         assert_eq!(super::state_dir(&repo), std::path::PathBuf::from("/r/.git/revaiw"));
         assert_eq!(crate::render::MARKER, "<!-- revaiw -->");
+    }
+    fn git(dir: &std::path::Path, args: &[&str]) -> String {
+        let o = std::process::Command::new("git").arg("-C").arg(dir).args(args)
+            .env("GIT_AUTHOR_NAME", "t").env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t").env("GIT_COMMITTER_EMAIL", "t@t")
+            .output().unwrap();
+        assert!(o.status.success(), "{:?}", String::from_utf8_lossy(&o.stderr));
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    }
+    fn commit(dir: &std::path::Path, file: &str) -> String {
+        std::fs::write(dir.join(file), format!("{file}\n")).unwrap();
+        git(dir, &["add", "."]);
+        git(dir, &["commit", "-qm", file]);
+        git(dir, &["rev-parse", "HEAD"])
+    }
+    /// `feat/k` pushed at `h1` (its own work over `base`), then `uat` moved on and merged in at `m`, not yet pushed.
+    fn merged_uat() -> (tempfile::TempDir, crate::git::Repo, crate::config::Config, [String; 3]) {
+        let t = tempfile::tempdir().unwrap();
+        let d = t.path();
+        git(d, &["init", "-q", "-b", "uat"]);
+        git(d, &["remote", "add", "origiin", "/nonexistent"]);
+        let base = commit(d, "a.txt");
+        git(d, &["checkout", "-qb", "feat/k"]);
+        let h1 = commit(d, "k.txt");
+        git(d, &["update-ref", "refs/remotes/origiin/feat/k", &h1]);
+        git(d, &["checkout", "-q", "uat"]);
+        let u = commit(d, "u.txt");
+        git(d, &["update-ref", "refs/remotes/origiin/uat", &u]);
+        git(d, &["checkout", "-q", "feat/k"]);
+        git(d, &["merge", "-q", "--no-edit", "uat"]);
+        let m = git(d, &["rev-parse", "HEAD"]);
+        let mut cfg = crate::config::Config::default();
+        cfg.branches.base = "uat".into();
+        let repo = crate::git::Repo::discover(d).unwrap();
+        (t, repo, cfg, [base, h1, m])
+    }
+    /// The branch's ledger records one review (of `h1`).
+    fn reviewed(repo: &crate::git::Repo) {
+        let mut l = crate::ledger::Ledger::default();
+        l.merge(&crate::model::ReviewOutput::default(), "h1");
+        l.save(&super::ledger_path(repo, "feat/k"));
+    }
+    #[test] fn a_push_that_only_merges_reviewed_code_is_not_queued_but_reported() {
+        let (_t, repo, cfg, [_, h1, m]) = merged_uat();
+        reviewed(&repo);
+        let mut q = crate::queue::Queue::default();
+        assert_eq!(super::enqueue(&repo, &cfg, &mut q, "feat/k", Some(&h1), &m, 100), super::Enqueued::MergedOnly);
+        assert!(q.entries.is_empty());
+    }
+    #[test] fn a_merge_only_push_onto_a_branch_never_reviewed_reviews_the_branch() {
+        let (_t, repo, cfg, [_, h1, m]) = merged_uat();
+        let mut q = crate::queue::Queue::default();
+        assert_eq!(super::enqueue(&repo, &cfg, &mut q, "feat/k", Some(&h1), &m, 100), super::Enqueued::Queued);
+        let e = &q.entries["feat/k"];
+        assert_eq!((Some(e.base.clone()), e.head.as_str()), (repo.range(None, &m, "uat"), m.as_str()), "the whole branch, h1 included");
+        assert!(repo.files_at_head(&e.base, &e.head).contains(&"k.txt".to_string()), "h1's file is in the range");
+    }
+    #[test] fn a_merge_only_push_during_a_first_review_waits_for_its_verdict() {
+        let (_t, repo, cfg, [base, h1, m]) = merged_uat();
+        let mut q = crate::queue::Queue::default();
+        q.push("feat/k", &base, &h1, 0, &|a, b| repo.is_ancestor(a, b));
+        q.take_eligible(1000, 0).unwrap();
+        assert_eq!(super::enqueue(&repo, &cfg, &mut q, "feat/k", Some(&h1), &m, 100), super::Enqueued::MergedBehindRun,
+                   "the ledger is still empty while the first review runs");
+        assert!(q.entries.is_empty());
+    }
+    #[test] fn a_merge_only_push_during_a_fix_gets_its_verdict_at_once() {
+        let (_t, repo, cfg, [_, h1, m]) = merged_uat();
+        reviewed(&repo);
+        let mut q = crate::queue::Queue::default();
+        q.push_fix("feat/k", vec![], "u", None, 0);
+        q.take_fix(0, &|_| Some(h1.clone())).unwrap();
+        assert_eq!(super::enqueue(&repo, &cfg, &mut q, "feat/k", Some(&h1), &m, 100), super::Enqueued::MergedOnly);
+    }
+    #[test] fn own_work_after_a_merge_on_a_branch_never_reviewed_reviews_the_branch() {
+        let (t, repo, cfg, [_, h1, m]) = merged_uat();
+        let h2 = commit(t.path(), "k2.txt");
+        let mut q = crate::queue::Queue::default();
+        assert_eq!(super::enqueue(&repo, &cfg, &mut q, "feat/k", Some(&h1), &h2, 100), super::Enqueued::Queued);
+        let e = &q.entries["feat/k"];
+        assert_ne!(e.base, m);
+        assert!(repo.files_at_head(&e.base, &e.head).contains(&"k.txt".to_string()), "h1's file is in the range");
+    }
+    #[test] fn a_remembered_merge_lasts_only_while_its_review_runs_and_nothing_newer_is_queued() {
+        use super::Enqueued::*;
+        let mut behind = std::collections::BTreeMap::new();
+        super::note_merge(&mut behind, "b", "m1", &MergedBehindRun);
+        assert_eq!(behind.get("b").map(String::as_str), Some("m1"));
+        for e in [Skipped, Queued, MergedOnly] {
+            super::note_merge(&mut behind, "b", "m1", &MergedBehindRun);
+            super::note_merge(&mut behind, "b", "x", &e);
+            assert!(behind.is_empty(), "{e:?} forgets it");
+        }
+        let mut q = crate::queue::Queue::default();
+        q.push("b", "a", "h1", 0, &|_, _| true);
+        q.take_eligible(1000, 0).unwrap();
+        super::note_merge(&mut behind, "b", "m1", &MergedBehindRun);
+        super::forget_ended_merges(&mut behind, &q);
+        assert!(behind.contains_key("b"), "its review still runs");
+        q.finish("b"); // the review failed: no verdict
+        super::forget_ended_merges(&mut behind, &q);
+        assert!(behind.is_empty());
+    }
+    #[test] fn a_merge_only_push_behind_a_running_review_waits_for_its_verdict() {
+        let (_t, repo, cfg, [base, h1, m]) = merged_uat();
+        reviewed(&repo);
+        let mut q = crate::queue::Queue::default();
+        q.push("feat/k", &base, &h1, 0, &|a, b| repo.is_ancestor(a, b));
+        q.take_eligible(1000, 0).unwrap();
+        assert_eq!(super::enqueue(&repo, &cfg, &mut q, "feat/k", Some(&h1), &m, 100), super::Enqueued::MergedBehindRun);
+        assert!(q.entries.is_empty());
+    }
+    #[test] fn a_finished_review_gives_its_verdict_for_the_merge_pushed_behind_it() {
+        let (_t, repo, _, [base, h1, m]) = merged_uat();
+        let anc = |a: &str, b: &str| repo.is_ancestor(a, b);
+        assert_eq!(super::verdict_head(&h1, Some(m.clone()), &anc), m, "h1 is in M: M's verdict, with h1's counts");
+        assert_eq!(super::verdict_head(&h1, None, &anc), h1);
+        assert_eq!(super::verdict_head(&m, Some(base), &anc), m, "a remembered head the review is not behind is ignored");
+    }
+    #[test] fn a_merge_only_push_onto_a_pending_review_moves_its_head() {
+        let (_t, repo, cfg, [base, h1, m]) = merged_uat();
+        let mut q = crate::queue::Queue::default();
+        q.push("feat/k", &base, &h1, 50, &|a, b| repo.is_ancestor(a, b));
+        assert_eq!(super::enqueue(&repo, &cfg, &mut q, "feat/k", Some(&h1), &m, 100), super::Enqueued::Queued);
+        let e = &q.entries["feat/k"];
+        assert_eq!((e.base.as_str(), e.head.as_str()), (base.as_str(), m.as_str()), "the unreviewed h1 is still in range");
+    }
+    #[test] fn a_head_with_ci_keeps_its_watch_and_a_partial_one_without_ci_gets_no_verdict() {
+        let (_t, repo, _, [_, _, m]) = merged_uat();
+        let w = |refused| super::CiWatch { head: m.clone(), told_skipped: false, since: 1, polled: 1, important: 2, refused, pr: Some(7) };
+        let kept = super::watch_or_verdict(&repo, "feat/k", w(0), true).expect("CI applies: watched");
+        assert_eq!((kept.head.as_str(), kept.important, kept.pr), (m.as_str(), 2, Some(7)));
+        assert!(super::watch_or_verdict(&repo, "feat/k", w(1), false).is_none());
+    }
+    #[test] fn own_work_after_a_merge_is_queued_from_the_merge() {
+        let (t, repo, cfg, [_, h1, m]) = merged_uat();
+        let h2 = commit(t.path(), "k2.txt");
+        reviewed(&repo);
+        let mut q = crate::queue::Queue::default();
+        assert_eq!(super::enqueue(&repo, &cfg, &mut q, "feat/k", Some(&h1), &h2, 100), super::Enqueued::Queued);
+        let e = &q.entries["feat/k"];
+        assert_eq!((e.base.as_str(), e.head.as_str()), (m.as_str(), h2.as_str()));
+    }
+    #[test] fn rulings_count_only_from_a_writer() {
+        for p in ["write", "admin", "maintain", " write\n"] {
+            assert_eq!(super::rulings_if_writer("r".into(), Ok(p.into())), Ok("r".into()), "{p:?}");
+        }
+        for p in ["read", "triage", "none", ""] { assert!(super::rulings_if_writer("r".into(), Ok(p.into())).is_err(), "{p:?}"); }
+        assert!(super::rulings_if_writer("r".into(), Err("404".into())).is_err());
     }
 }

@@ -43,6 +43,9 @@ pub struct Entry {
     /// A `@review` mention's request. A later push keeps it: the question still applies to the newer head.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request: Option<Request>,
+    /// `revaiw now` / `@review`: the whole branch, so a full review (nits listed again), never a follow-up.
+    #[serde(default)]
+    pub whole: bool,
 }
 
 fn is_zero(n: &u32) -> bool { *n == 0 }
@@ -64,7 +67,8 @@ pub struct Queue {
 
 impl Queue {
     /// `is_ancestor(a, b)`: a is an ancestor of b. A kept base must be one, or a force-push would review
-    /// everything the rebase pulled in.
+    /// everything the rebase pulled in. While a review runs, the follow-up starts at its head, or at `base` when that
+    /// is later (a merge `enqueue` narrowed to).
     pub fn push(&mut self, branch: &str, base: &str, head: &str, now: u64, is_ancestor: &dyn Fn(&str, &str) -> bool) {
         if let Some(e) = self.entries.get_mut(branch) {
             if !is_ancestor(&e.base, head) { e.base = base.into(); }
@@ -75,17 +79,17 @@ impl Queue {
             return;
         }
         let base = match self.running.get(branch) {
-            Some(r) if is_ancestor(&r.head, head) => r.head.clone(),
+            Some(r) if is_ancestor(&r.head, head) => if is_ancestor(&r.head, base) { base.to_string() } else { r.head.clone() },
             _ => base.to_string(),
         };
-        self.entries.insert(branch.into(), Entry { base, head: head.into(), queued_at: now, model: None, attempts: 0, request: None });
+        self.entries.insert(branch.into(), Entry { base, head: head.into(), queued_at: now, model: None, attempts: 0, request: None, whole: false });
     }
 
     /// A `revaiw now` request: always the whole branch (`base` is its merge-base with the base branch), replacing a
     /// pending entry's range and skipping push's running-head shortcut, which on an unchanged head would
     /// queue an empty range. Due at once.
     pub fn push_now(&mut self, branch: &str, base: &str, head: &str, model: Option<String>, request: Option<Request>) {
-        self.entries.insert(branch.into(), Entry { base: base.into(), head: head.into(), queued_at: 0, model, attempts: 0, request });
+        self.entries.insert(branch.into(), Entry { base: base.into(), head: head.into(), queued_at: 0, model, attempts: 0, request, whole: true });
     }
 
     pub fn push_fix(&mut self, branch: &str, ids: Vec<String>, login: &str, comment_id: Option<u64>, now: u64) {
@@ -110,7 +114,7 @@ impl Queue {
             let Some(head) = head_of(&b) else { continue };
             self.running_fixes.insert(b.clone(), f.clone());
             self.running.insert(b.clone(), Entry { base: head.clone(), head: head.clone(), queued_at: f.queued_at,
-                                                   model: None, attempts: 0, request: None });
+                                                   model: None, attempts: 0, request: None, whole: false });
             return Some((b, f, head));
         }
     }
@@ -223,7 +227,7 @@ impl Queue {
 mod tests {
     use super::*;
     fn ent(base: &str, head: &str) -> Entry {
-        Entry { base: base.into(), head: head.into(), queued_at: 0, model: None, attempts: 0, request: None }
+        Entry { base: base.into(), head: head.into(), queued_at: 0, model: None, attempts: 0, request: None, whole: false }
     }
     #[test] fn now_reviews_the_whole_branch_even_while_it_runs() {
         let mut q = Queue::default();
@@ -232,6 +236,13 @@ mod tests {
         q.push_now("feat/x", "m", "h", Some("sonnet".into()), None);
         let e = &q.entries["feat/x"];
         assert_eq!((e.base.as_str(), e.head.as_str(), e.model.as_deref(), e.queued_at), ("m", "h", Some("sonnet"), 0));
+    }
+    #[test] fn only_now_marks_an_entry_whole() {
+        let mut q = Queue::default();
+        q.push("feat/x", "a", "b", 100, &|_, _| true);
+        assert!(!q.entries["feat/x"].whole);
+        q.push_now("feat/x", "m", "b", None, None);
+        assert!(q.entries["feat/x"].whole);
     }
     #[test] fn now_replaces_a_pending_incremental_range() {
         let mut q = Queue::default();
@@ -279,11 +290,27 @@ mod tests {
         let mut q = Queue::default();
         q.push("x", "a", "b", 0, &|_, _| true);
         q.take_eligible(100, 90).unwrap();
-        q.push("x", "a", "c", 100, &|_, _| true);
+        q.push("x", "a", "c", 100, &|a, b| (a, b) != ("b", "a")); // a precedes the running head b
         assert!(q.take_eligible(500, 90).is_none(), "never two runs of one branch");
         q.finish("x");
         let (_, e) = q.take_eligible(500, 90).unwrap();
         assert_eq!((e.base.as_str(), e.head.as_str()), ("b", "c"));
+    }
+    #[test] fn a_follow_up_starts_at_a_merge_narrowed_base_that_descends_from_the_running_head() {
+        let mut q = Queue::default();
+        q.push("x", "a", "r", 0, &|_, _| true);
+        q.take_eligible(100, 90).unwrap();
+        q.push("x", "m", "h", 100, &|a, b| (a, b) == ("r", "m") || (a, b) == ("r", "h")); // m descends from r
+        q.finish("x");
+        let (_, e) = q.take_eligible(500, 90).unwrap();
+        assert_eq!((e.base.as_str(), e.head.as_str()), ("m", "h"));
+        q.finish("x");
+        q.push("x", "a", "r", 600, &|_, _| true);
+        q.take_eligible(1000, 90).unwrap();
+        q.push("x", "r", "h", 1000, &|_, _| true); // base equal to the running head stays it
+        q.finish("x");
+        let (_, e) = q.take_eligible(2000, 90).unwrap();
+        assert_eq!((e.base.as_str(), e.head.as_str()), ("r", "h"));
     }
     #[test] fn force_push_replaces_a_base_that_is_no_longer_an_ancestor() {
         let mut q = Queue::default();

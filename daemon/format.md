@@ -7,13 +7,17 @@ For each `/code-review` finding:
 - Open the file and find the code the finding describes. `/code-review` line numbers can be off: correct
   `line` to where that code is. Never drop a finding: you format, the engine decided. If you cannot locate the
   code, keep the finding at its cited line with an empty snippet.
-- `severity`: `important` when a reasonable person using the software gets a wrong result, or a REVIEW.md gate
-  is broken; otherwise `nit`. A finding about code this range did not change is `pre_existing`.
+- `severity`: `important` only when the finding names a concrete trigger reachable from real inputs on a path that
+  is live today and a reasonable person gets a wrong result, or a REVIEW.md gate is broken. Keep everything else,
+  including defensive checks, unreachable or dormant paths (an unused plan, an unset field, a disabled feature,
+  input the provider cannot send) and failures that need an unlikely chain of events, as a `nit`. A finding about
+  code this range did not change is `pre_existing`.
+- A finding matching a "Settled decisions" entry is kept as a `nit` (never dropped).
 - `why`: the finding's failure scenario, kept concrete. `summary`: one sentence.
 - `snippet`: at most 8 lines of the offending code from the file; `lang` is its fence language.
 - `suggestion`: only for a small mechanical fix, the exact replacement text for `line..end_line`.
   `suggested_patch`: the same fix as a unified diff.
-- Never add a finding of your own, and keep at most 5 nits.
+- Never add a finding of your own. List at most 5 nits; count any beyond that in `summary` as "plus N similar".
 
 For each open finding from earlier pushes (listed in the message): read its file at its line. Put its id in
 `resolved` when the code no longer has the problem, in `still_open` when it does. Never re-report it.

@@ -166,6 +166,39 @@ impl Repo {
             .or_else(|| self.git(&["merge-base", new, &remote_base]))
     }
 
+    /// A push's own work, when it merged in code another remote branch already has (spec C1): the latest merge on
+    /// the first-parent chain of `old..new` whose other parents are all on some other remote branch, which was
+    /// reviewed there. None when there is no such merge, or when this push also has its own commits before it:
+    /// starting at the merge would leave those unreviewed. Conflict resolutions inside the merge are not reviewed.
+    pub fn merged_in(&self, old: &str, new: &str, branch: &str) -> Option<(String, String)> {
+        let merges = self.git(&["rev-list", "--first-parent", "--merges", "--parents", &format!("{old}..{new}")])?;
+        for line in merges.lines() {
+            let Some(via) = self.reviewed_merge(line, branch) else { continue };
+            let m = line.split_whitespace().next()?;
+            // Earlier merges of reviewed code in the same push (main, then uat) are not own work either.
+            let before = self.git(&["rev-list", "--first-parent", "--parents", &format!("{old}..{m}^1")])?;
+            return before.lines().all(|l| self.reviewed_merge(l, branch).is_some()).then(|| (m.to_string(), via));
+        }
+        None
+    }
+
+    /// For a `rev-list --parents` line: the other remote branch holding the merged code, when the commit is a merge
+    /// whose non-first parents are all on one. None for an ordinary commit.
+    fn reviewed_merge(&self, line: &str, branch: &str) -> Option<String> {
+        let mut via = None;
+        for p in line.split_whitespace().skip(2) {
+            via = Some(self.on_other_branch(p, branch)?);
+        }
+        via
+    }
+
+    /// A remote branch other than `branch` (and `HEAD`) that contains `sha`.
+    fn on_other_branch(&self, sha: &str, branch: &str) -> Option<String> {
+        let prefix = format!("refs/remotes/{}", self.remote);
+        self.git(&["for-each-ref", "--contains", sha, "--format=%(refname:lstrip=3)", &prefix])?
+            .lines().find(|b| *b != branch && *b != "HEAD").map(str::to_string)
+    }
+
     /// Where a review, fix or CI checkout takes its steer files (`is_steer`): the trunk's merge-base with `head`, else
     /// the remote trunk's tip. Never the diff base, which for a follow-up push is the PR's own previous commit.
     /// None when neither resolves: there is nothing trusted to take them from.
@@ -540,5 +573,66 @@ mod tests {
         x.sort();
         assert_eq!(x, vec![2, 3, 4, 12]);
         assert!(m.get("gone.ts").map_or(true, |s| s.is_empty()));
+    }
+    /// A feature branch `feat/k` at `own`, with `uat` (another remote branch) moved on by `u`.
+    fn branch_and_moved_uat(d: &Path) -> (String, String) {
+        sh(d, &["checkout", "-qb", "feat/k"]);
+        let own = commit(d, "k.txt", "k\n");
+        sh(d, &["update-ref", "refs/remotes/origiin/feat/k", &own]);
+        sh(d, &["checkout", "-q", "uat"]);
+        let u = commit(d, "u.txt", "reviewed on uat\n");
+        sh(d, &["update-ref", "refs/remotes/origiin/uat", &u]);
+        sh(d, &["checkout", "-q", "feat/k"]);
+        (own, u)
+    }
+    #[test]
+    fn a_push_that_only_merges_another_branch_starts_at_the_merge() {
+        let (t, repo, _) = fixture();
+        let d = t.path();
+        let (own, _) = branch_and_moved_uat(d);
+        sh(d, &["merge", "-q", "--no-edit", "uat"]);
+        let m = sh(d, &["rev-parse", "HEAD"]);
+        assert_eq!(repo.merged_in(&own, &m, "feat/k"), Some((m.clone(), "uat".to_string())));
+        let after = commit(d, "k2.txt", "own work after the merge\n");
+        assert_eq!(repo.merged_in(&own, &after, "feat/k").map(|x| x.0), Some(m), "own work after M is reviewed from M");
+    }
+    #[test]
+    fn own_work_before_a_merge_keeps_the_whole_push() {
+        let (t, repo, _) = fixture();
+        let d = t.path();
+        let (own, _) = branch_and_moved_uat(d);
+        commit(d, "k1.txt", "own work before the merge\n");
+        sh(d, &["merge", "-q", "--no-edit", "uat"]);
+        let m = sh(d, &["rev-parse", "HEAD"]);
+        assert_eq!(repo.merged_in(&own, &m, "feat/k"), None);
+    }
+    #[test]
+    fn two_merges_of_reviewed_code_in_one_push_start_at_the_latest() {
+        let (t, repo, base) = fixture();
+        let d = t.path();
+        let (own, _) = branch_and_moved_uat(d);
+        sh(d, &["checkout", "-qb", "main", &base]);
+        let mn = commit(d, "m.txt", "reviewed on main\n");
+        sh(d, &["update-ref", "refs/remotes/origiin/main", &mn]);
+        sh(d, &["checkout", "-q", "feat/k"]);
+        sh(d, &["merge", "-q", "--no-edit", "main"]);
+        sh(d, &["merge", "-q", "--no-edit", "uat"]);
+        let m = sh(d, &["rev-parse", "HEAD"]);
+        assert_eq!(repo.merged_in(&own, &m, "feat/k"), Some((m, "uat".to_string())));
+    }
+    #[test]
+    fn a_merge_of_code_no_other_branch_has_is_reviewed() {
+        let (t, repo, _) = fixture();
+        let d = t.path();
+        sh(d, &["checkout", "-qb", "feat/k"]);
+        let own = commit(d, "k.txt", "k\n");
+        sh(d, &["checkout", "-qb", "local-only", "uat"]);
+        commit(d, "l.txt", "never pushed anywhere\n");
+        sh(d, &["checkout", "-q", "feat/k"]);
+        sh(d, &["merge", "-q", "--no-edit", "local-only"]);
+        let m = sh(d, &["rev-parse", "HEAD"]);
+        sh(d, &["update-ref", "refs/remotes/origiin/feat/k", &m]); // this branch's own ref has it: not "another"
+        assert_eq!(repo.merged_in(&own, &m, "feat/k"), None);
+        assert_eq!(repo.merged_in(&own, &own, "feat/k"), None, "an empty range has no merge");
     }
 }

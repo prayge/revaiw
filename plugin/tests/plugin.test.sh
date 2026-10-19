@@ -44,4 +44,5 @@ out=$(printf '{"session_id":"s1","cwd":"%s","hook_event_name":"UserPromptSubmit"
 rm -rf "$t/.review" "$t/.git/revaiw"
 out=$(printf '{"cwd":"%s"}' "$t" | bash "$here/statusline/rev-segment.sh")
 [ -z "$out" ] || fail "unconfigured should be silent: $out"
+grep -q 'at most \*\*3 fix-and-push rounds\*\*' "$here/skills/review-watch/SKILL.md" || fail "review-watch round cap is not 3"
 echo "plugin ok"

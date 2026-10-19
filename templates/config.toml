@@ -14,6 +14,8 @@
 # graphify = true
 
 [routing]
+# opus_paths send a branch's first review to the large model; follow-ups on them use the medium one while
+# important findings are open.
 # opus_paths = ["/prisma/schema", "/migrations/", "/auth/", "/billing/", "/stripe/", "/rls"]
 # sonnet_paths = ["/validations/", "/connectors/", "/integrations/", "/.github/workflows/", "/infra/"]
 # risk_words = ["security", "migration", "auth", "breaking", "rls", "payment"]

@@ -37,6 +37,7 @@ Monitor  command: revaiw watch <branch>
 | `review <b>@<sha>: 🔴 N important … → <md>` | Read `<md>`. For each important finding: if it has a `suggested_patch` in the ledger (`.reviews/<b>/ledger.json` in the main worktree, absolute path in the line), apply it with `git apply` from this worktree's root. Otherwise fix it by hand. If it is wrong, mark it `dismissed` with a one-line `decision_reason` in the ledger. Then run the area's tests, commit and push the branch. The next review checks the fix. |
 | `ci <b>@<sha>: 🧪 N important …` | Same as above for the CI findings. `pre_existing` ones are already broken on the base branch: mention them to the user, don't fix them here. |
 | `review …: clean (0 important …), waiting for CI` | Nothing to do. Keep the watch armed. |
+| `<b>: only merges <ref> @<sha>, already reviewed there; skipped` | Nothing to review: the merged code was reviewed on `<ref>`. Keep the watch armed for the CI verdict on that commit. |
 | `review …: ⚠️ partial …` / `<b>: ⚠️ partial review @<sha>, …` / `<b>: CI green …, review partial …` | Not ready to merge: the reviewer could not read or check something. Tell the user what went unread (listed in `<md>` and the review comment) and offer your pre-PR review skill, if the repo has one. |
 | `<b>: CI skipped @<sha> (draft PR?) …` | Draft PRs skip CI, so it isn't ready yet. Tell the user once that review is clean and CI runs when the PR is marked ready. Keep the watch armed (re-arm on expiry): the daemon keeps polling that commit for up to 24 h. |
 | `<b>: ✅ ready to merge @<sha> …` | Tell the user the PR is ready to merge (review clean, CI green), and send a PushNotification. Nits stay as suggestions. |
@@ -48,7 +49,7 @@ Monitor  command: revaiw watch <branch>
 
 ## Limits
 
-- **Round cap:** at most **5 fix-and-push rounds** per PR without the user. If importants keep coming back,
+- **Round cap:** at most **3 fix-and-push rounds** per PR without the user. If importants keep coming back,
   stop and show the user the remaining findings. Follow-up reviews report only important findings, so a clean
   branch converges.
 - **Branch scope:** push fixes only to this conversation's own branch. Never push to the repo's base branch (`branches.base` in `.review/config.toml`) unless the user says so.
