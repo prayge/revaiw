@@ -366,11 +366,12 @@ pub fn run(repo: Repo) {
             w.polled = t;
             match github::ci_runs(&w.head).map(|r| github::ci_state(&r)) {
                 Some(github::CiState::Failed(runs)) => {
-                    let failures: Vec<(String, String)> = runs.iter().map(|r| (r.name.clone(), github::failed_log(r.id))).collect();
-                    if ci_logs_all_empty(&failures) {
+                    let logs: Vec<(String, Option<String>)> = runs.iter().map(|r| (r.name.clone(), github::failed_log(r.id))).collect();
+                    if ci_logs_all_empty(&logs) {
                         announce(&repo, b, &ci_no_logs(b, &w.head, w.pr), w.pr);
                     } else {
                         log!("{b}: {} CI run(s) failed on {}", runs.len(), &w.head[..7]);
+                        let failures = logs.into_iter().map(|(n, l)| (n, l.unwrap_or_default())).collect();
                         ci_due.push(CiJob { branch: b.clone(), head: w.head.clone(), failures });
                     }
                     w.since = 0; // done
@@ -1087,10 +1088,10 @@ fn ci_verdict(branch: &str, head: &str, pr: Option<u64>, important: usize, refus
     }
 }
 
-/// Every failed run's log is blank: GitHub could not run the jobs (billing, an outage), so there is nothing to
-/// diagnose (spec C6).
-fn ci_logs_all_empty(failures: &[(String, String)]) -> bool {
-    !failures.is_empty() && failures.iter().all(|(_, log)| log.trim().is_empty())
+/// Every failed run's log was read and is blank: GitHub could not run the jobs (billing, an outage), so there is
+/// nothing to diagnose (spec C6). A log gh could not fetch (None) is unknown, so it is diagnosed as before.
+fn ci_logs_all_empty(logs: &[(String, Option<String>)]) -> bool {
+    !logs.is_empty() && logs.iter().all(|(_, log)| log.as_deref().is_some_and(|l| l.trim().is_empty()))
 }
 
 /// Matches review-watch's "<b>: … failed …" row.
@@ -1147,10 +1148,11 @@ mod tests {
         // File deleted on a readable trunk: no error, defaults are the repo's.
         assert_eq!(super::next_config(&good, loaded(Config::default(), None, true)).0, Config::default());
     }
-    #[test] fn ci_logs_all_empty_only_when_every_log_is_blank() {
-        let f = |logs: &[&str]| logs.iter().map(|l| ("check".to_string(), l.to_string())).collect::<Vec<_>>();
-        assert!(super::ci_logs_all_empty(&f(&["", "  \n"])));
-        assert!(!super::ci_logs_all_empty(&f(&["", "FAIL a.test.ts"])));
+    #[test] fn ci_logs_all_empty_only_when_every_log_is_read_and_blank() {
+        let f = |logs: &[Option<&str>]| logs.iter().map(|l| ("check".to_string(), l.map(String::from))).collect::<Vec<_>>();
+        assert!(super::ci_logs_all_empty(&f(&[Some(""), Some("  \n")])));
+        assert!(!super::ci_logs_all_empty(&f(&[Some(""), Some("FAIL a.test.ts")])));
+        assert!(!super::ci_logs_all_empty(&f(&[Some(""), None])), "a log gh could not fetch is not an empty one");
         assert!(!super::ci_logs_all_empty(&[]), "no runs is not an outage");
     }
     #[test] fn an_empty_log_line_names_its_pr_and_reads_as_failed() {

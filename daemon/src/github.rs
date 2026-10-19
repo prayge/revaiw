@@ -192,8 +192,9 @@ pub fn log_tail(log: &str, lines: usize, max: usize) -> String {
     t
 }
 
-pub fn failed_log(run_id: u64) -> String {
-    log_tail(&gh(&["run", "view", &run_id.to_string(), "--log-failed"], None).unwrap_or_default(), 150, 12_000)
+/// None when gh fails: that is no answer, not an empty log (which reads as an Actions outage, spec C6).
+pub fn failed_log(run_id: u64) -> Option<String> {
+    gh(&["run", "view", &run_id.to_string(), "--log-failed"], None).ok().map(|l| log_tail(&l, 150, 12_000))
 }
 
 /// Commit status for the PR's checks list, posted only when a review completes, and always "success" with the
