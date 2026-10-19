@@ -64,7 +64,8 @@ pub struct Queue {
 
 impl Queue {
     /// `is_ancestor(a, b)`: a is an ancestor of b. A kept base must be one, or a force-push would review
-    /// everything the rebase pulled in.
+    /// everything the rebase pulled in. While a review runs, the follow-up starts at its head, or at `base` when that
+    /// is later (a merge `enqueue` narrowed to).
     pub fn push(&mut self, branch: &str, base: &str, head: &str, now: u64, is_ancestor: &dyn Fn(&str, &str) -> bool) {
         if let Some(e) = self.entries.get_mut(branch) {
             if !is_ancestor(&e.base, head) { e.base = base.into(); }
@@ -75,7 +76,7 @@ impl Queue {
             return;
         }
         let base = match self.running.get(branch) {
-            Some(r) if is_ancestor(&r.head, head) => r.head.clone(),
+            Some(r) if is_ancestor(&r.head, head) => if is_ancestor(&r.head, base) { base.to_string() } else { r.head.clone() },
             _ => base.to_string(),
         };
         self.entries.insert(branch.into(), Entry { base, head: head.into(), queued_at: now, model: None, attempts: 0, request: None });
@@ -279,11 +280,27 @@ mod tests {
         let mut q = Queue::default();
         q.push("x", "a", "b", 0, &|_, _| true);
         q.take_eligible(100, 90).unwrap();
-        q.push("x", "a", "c", 100, &|_, _| true);
+        q.push("x", "a", "c", 100, &|a, b| (a, b) != ("b", "a")); // a precedes the running head b
         assert!(q.take_eligible(500, 90).is_none(), "never two runs of one branch");
         q.finish("x");
         let (_, e) = q.take_eligible(500, 90).unwrap();
         assert_eq!((e.base.as_str(), e.head.as_str()), ("b", "c"));
+    }
+    #[test] fn a_follow_up_starts_at_a_merge_narrowed_base_that_descends_from_the_running_head() {
+        let mut q = Queue::default();
+        q.push("x", "a", "r", 0, &|_, _| true);
+        q.take_eligible(100, 90).unwrap();
+        q.push("x", "m", "h", 100, &|a, b| (a, b) == ("r", "m") || (a, b) == ("r", "h")); // m descends from r
+        q.finish("x");
+        let (_, e) = q.take_eligible(500, 90).unwrap();
+        assert_eq!((e.base.as_str(), e.head.as_str()), ("m", "h"));
+        q.finish("x");
+        q.push("x", "a", "r", 600, &|_, _| true);
+        q.take_eligible(1000, 90).unwrap();
+        q.push("x", "r", "h", 1000, &|_, _| true); // base equal to the running head stays it
+        q.finish("x");
+        let (_, e) = q.take_eligible(2000, 90).unwrap();
+        assert_eq!((e.base.as_str(), e.head.as_str()), ("r", "h"));
     }
     #[test] fn force_push_replaces_a_base_that_is_no_longer_an_ancestor() {
         let mut q = Queue::default();
