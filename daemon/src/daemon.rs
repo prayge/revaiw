@@ -248,11 +248,10 @@ pub fn run(repo: Repo) {
           if let Some(next) = repo.snapshot() {
             for (b, sha) in &next {
                 if snap.get(b) == Some(sha) || filter::skip_branch(&cfg, b) || !cfg.triggers.push { continue; }
-                match enqueue(&repo, &cfg, &mut q, b, snap.get(b).map(String::as_str), sha, t) {
-                    Enqueued::MergedOnly => if let Some(w) = merged_only_watch(&repo, &cfg, b, sha, t) { watches.insert(b.clone(), w); },
-                    Enqueued::MergedBehindRun => { merged_behind.insert(b.clone(), sha.clone()); }
-                    Enqueued::Queued => { merged_behind.remove(b); }
-                    Enqueued::Skipped => {}
+                let e = enqueue(&repo, &cfg, &mut q, b, snap.get(b).map(String::as_str), sha, t);
+                note_merge(&mut merged_behind, b, sha, &e);
+                if e == Enqueued::MergedOnly {
+                    if let Some(w) = merged_only_watch(&repo, &cfg, b, sha, t) { watches.insert(b.clone(), w); }
                 }
                 changed = true;
             }
@@ -265,7 +264,11 @@ pub fn run(repo: Repo) {
             for (b, tier) in body.lines().map(route::parse_now_line).filter(|(b, _)| !b.is_empty()) {
                 let tier = tier.unwrap_or_else(|t| { log!("now: unknown model {t} for {b}, routing by size"); None });
                 match snap.get(&b) {
-                    Some(sha) => { let sha = sha.clone(); changed |= enqueue_now(&repo, &cfg, &mut q, &b, &sha, tier, None); }
+                    Some(sha) => {
+                        let sha = sha.clone();
+                        merged_behind.remove(&b);
+                        changed |= enqueue_now(&repo, &cfg, &mut q, &b, &sha, tier, None);
+                    }
                     None => log!("now: no remote branch {b}"),
                 }
             }
@@ -284,6 +287,7 @@ pub fn run(repo: Repo) {
                         let dropped = match snap.get(&branch) {
                             Some(sha) => {
                                 let sha = sha.clone();
+                                merged_behind.remove(&branch);
                                 log!("{branch}: review requested by @{} (#{id})", request.login);
                                 if enqueue_now(&repo, &cfg, &mut q, &branch, &sha, model, Some(request)) { None }
                                 else { Some("nothing reviewable in the range") }
@@ -349,6 +353,8 @@ pub fn run(repo: Repo) {
                 _ => i += 1,
             }
         }
+
+        forget_ended_merges(&mut merged_behind, &q);
 
         // A checks child is a job like any other: it starts only when the resource guard allows (spec §5.4.4). Until
         // then (or while the guard cannot be read) the fix waits here with U, C and its harvested files intact.
@@ -479,18 +485,23 @@ fn enqueue(repo: &Repo, cfg: &Config, q: &mut Queue, b: &str, old: Option<&str>,
     // review: its range still holds this branch's own unreviewed commits, so it keeps its base and moves to `sha`.
     let pending = q.entries.contains_key(b);
     if let Some((m, via)) = old.filter(|o| *o == base && !pending).and_then(|o| repo.merged_in(o, sha, b)) {
-        if m != sha {
+        // A review (not a fix) of this branch running now covers its earlier commits, even a first one.
+        let review = q.running.get(b).filter(|_| !q.running_fixes.contains_key(b));
+        if m == sha && review.is_some_and(|r| repo.is_ancestor(&r.head, sha)) {
+            log!("{b}: only merges {via} @{}, already reviewed there; skipped", &sha[..7]);
+            return Enqueued::MergedBehindRun;
+        }
+        if review.is_none() && Ledger::load(&ledger_path(repo, b)).reviews == 0 {
+            // Nothing of this branch was reviewed yet (pushed before the daemon ran): a ✅ must not come from an
+            // empty ledger, nor its earlier commits go unreviewed, so the branch gets its first review.
+            log!("{b}: merges {via} @{}, but the branch has no review yet; reviewing all of it", &m[..7]);
+            if let Some(whole) = repo.range(None, sha, &cfg.branches.base) { base = whole; }
+        } else if m != sha {
             log!("{b}: reviewing from merge {} ({via}'s code was reviewed there)", &m[..7]);
             base = m;
-        } else if Ledger::load(&ledger_path(repo, b)).reviews == 0 {
-            // Nothing of this branch was reviewed yet (pushed before the daemon ran): a ✅ must not come from an
-            // empty ledger, so the branch gets its first review.
-            log!("{b}: only merges {via} @{}, but the branch has no review yet; reviewing it", &sha[..7]);
-            if let Some(whole) = repo.range(None, sha, &cfg.branches.base) { base = whole; }
         } else {
             log!("{b}: only merges {via} @{}, already reviewed there; skipped", &sha[..7]);
-            let behind = q.running.get(b).is_some_and(|r| repo.is_ancestor(&r.head, sha));
-            return if behind { Enqueued::MergedBehindRun } else { Enqueued::MergedOnly };
+            return Enqueued::MergedOnly;
         }
     }
     let files = repo.numstat(&base, sha);
@@ -961,6 +972,18 @@ fn merged_only_watch(repo: &Repo, cfg: &Config, b: &str, head: &str, t: u64) -> 
     watch_or_verdict(repo, b, CiWatch { head: head.into(), told_skipped: false, since: t, polled: t, important, refused: 0, pr }, ci)
 }
 
+/// Remembers a merge-only head pushed behind a running review (`Enqueued::MergedBehindRun`); any other outcome for
+/// the branch (a newer push, a skip, a `revaiw now`) forgets it, since that review's verdict is no longer for it.
+fn note_merge(behind: &mut std::collections::BTreeMap<String, String>, b: &str, sha: &str, e: &Enqueued) {
+    if *e == Enqueued::MergedBehindRun { behind.insert(b.into(), sha.into()); } else { behind.remove(b); }
+}
+
+/// A remembered merge head lives only while the review it waits on is running or requeued (a usage limit); a review
+/// that ended without a verdict (failed) takes it along.
+fn forget_ended_merges(behind: &mut std::collections::BTreeMap<String, String>, q: &Queue) {
+    behind.retain(|b, _| (q.running.contains_key(b) && !q.running_fixes.contains_key(b)) || q.entries.contains_key(b));
+}
+
 /// The head a finished review's watch or verdict is for: the merge-only push that landed while it ran
 /// (`Enqueued::MergedBehindRun`) when the reviewed head is in it, else the reviewed head.
 fn verdict_head(head: &str, merged: Option<String>, is_ancestor: &dyn Fn(&str, &str) -> bool) -> String {
@@ -1382,6 +1405,53 @@ mod tests {
         assert_eq!(super::enqueue(&repo, &cfg, &mut q, "feat/k", Some(&h1), &m, 100), super::Enqueued::Queued);
         let e = &q.entries["feat/k"];
         assert_eq!((Some(e.base.clone()), e.head.as_str()), (repo.range(None, &m, "uat"), m.as_str()), "the whole branch, h1 included");
+        assert!(repo.files_at_head(&e.base, &e.head).contains(&"k.txt".to_string()), "h1's file is in the range");
+    }
+    #[test] fn a_merge_only_push_during_a_first_review_waits_for_its_verdict() {
+        let (_t, repo, cfg, [base, h1, m]) = merged_uat();
+        let mut q = crate::queue::Queue::default();
+        q.push("feat/k", &base, &h1, 0, &|a, b| repo.is_ancestor(a, b));
+        q.take_eligible(1000, 0).unwrap();
+        assert_eq!(super::enqueue(&repo, &cfg, &mut q, "feat/k", Some(&h1), &m, 100), super::Enqueued::MergedBehindRun,
+                   "the ledger is still empty while the first review runs");
+        assert!(q.entries.is_empty());
+    }
+    #[test] fn a_merge_only_push_during_a_fix_gets_its_verdict_at_once() {
+        let (_t, repo, cfg, [_, h1, m]) = merged_uat();
+        reviewed(&repo);
+        let mut q = crate::queue::Queue::default();
+        q.push_fix("feat/k", vec![], "u", None, 0);
+        q.take_fix(0, &|_| Some(h1.clone())).unwrap();
+        assert_eq!(super::enqueue(&repo, &cfg, &mut q, "feat/k", Some(&h1), &m, 100), super::Enqueued::MergedOnly);
+    }
+    #[test] fn own_work_after_a_merge_on_a_branch_never_reviewed_reviews_the_branch() {
+        let (t, repo, cfg, [_, h1, m]) = merged_uat();
+        let h2 = commit(t.path(), "k2.txt");
+        let mut q = crate::queue::Queue::default();
+        assert_eq!(super::enqueue(&repo, &cfg, &mut q, "feat/k", Some(&h1), &h2, 100), super::Enqueued::Queued);
+        let e = &q.entries["feat/k"];
+        assert_ne!(e.base, m);
+        assert!(repo.files_at_head(&e.base, &e.head).contains(&"k.txt".to_string()), "h1's file is in the range");
+    }
+    #[test] fn a_remembered_merge_lasts_only_while_its_review_runs_and_nothing_newer_is_queued() {
+        use super::Enqueued::*;
+        let mut behind = std::collections::BTreeMap::new();
+        super::note_merge(&mut behind, "b", "m1", &MergedBehindRun);
+        assert_eq!(behind.get("b").map(String::as_str), Some("m1"));
+        for e in [Skipped, Queued, MergedOnly] {
+            super::note_merge(&mut behind, "b", "m1", &MergedBehindRun);
+            super::note_merge(&mut behind, "b", "x", &e);
+            assert!(behind.is_empty(), "{e:?} forgets it");
+        }
+        let mut q = crate::queue::Queue::default();
+        q.push("b", "a", "h1", 0, &|_, _| true);
+        q.take_eligible(1000, 0).unwrap();
+        super::note_merge(&mut behind, "b", "m1", &MergedBehindRun);
+        super::forget_ended_merges(&mut behind, &q);
+        assert!(behind.contains_key("b"), "its review still runs");
+        q.finish("b"); // the review failed: no verdict
+        super::forget_ended_merges(&mut behind, &q);
+        assert!(behind.is_empty());
     }
     #[test] fn a_merge_only_push_behind_a_running_review_waits_for_its_verdict() {
         let (_t, repo, cfg, [base, h1, m]) = merged_uat();
@@ -1417,6 +1487,7 @@ mod tests {
     #[test] fn own_work_after_a_merge_is_queued_from_the_merge() {
         let (t, repo, cfg, [_, h1, m]) = merged_uat();
         let h2 = commit(t.path(), "k2.txt");
+        reviewed(&repo);
         let mut q = crate::queue::Queue::default();
         assert_eq!(super::enqueue(&repo, &cfg, &mut q, "feat/k", Some(&h1), &h2, 100), super::Enqueued::Queued);
         let e = &q.entries["feat/k"];
