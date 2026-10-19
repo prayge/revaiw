@@ -5,7 +5,7 @@
 # Lines (" #<pr>" follows <sha> on review, ci and CI-verdict lines when the branch has an open PR):
 #        "review <b>@<sha>: 🔴 N important …" · "review …: clean …, waiting for CI" · "review …: ⚠️ partial …"
 #        "ci <b>@<sha>: 🧪 …" · "fix <b>@<sha>: 🔧 pushed <ids> → <sha>" · "fix <b>@<sha>: ⛔ not pushed (<reason>)" · "<b>: ⚠️ partial review @<sha> …"
-#        "<b>: ✅ ready to merge @<sha> …" · "<b>: CI green …" · "<b>: … failed …" · "revaiw stopped"
+#        "<b>: ✅ ready to merge @<sha> …" · "<b>: CI green …" · "<b>: … failed …" · "<b>: only merges <ref> @<sha> …; skipped" · "revaiw stopped"
 # Exits at once if the daemon isn't running, and when it is stopped (`revaiw stop` leaves a `stopped` marker).
 # A restart (`revaiw start` replacing a stale build, a crash that plugin/hooks/autostart.sh recovers) is not a stop: the watch
 # waits up to WATCH_RESTART_WAIT seconds (default 120) for the new daemon and keeps going.

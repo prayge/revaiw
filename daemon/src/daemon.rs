@@ -74,7 +74,7 @@ enum Kind {
     FixChecks,
 }
 
-/// A reviewed head whose GitHub Actions runs are awaited; failures become a CI job.
+/// A reviewed head (or a merge-only push of reviewed code) whose GitHub Actions runs are awaited; failures become a CI job.
 struct CiWatch {
     head: String,
     /// Already told the conversation this head's CI is skipped (draft); keep polling for real runs.
@@ -246,7 +246,9 @@ pub fn run(repo: Repo) {
           if let Some(next) = repo.snapshot() {
             for (b, sha) in &next {
                 if snap.get(b) == Some(sha) || filter::skip_branch(&cfg, b) || !cfg.triggers.push { continue; }
-                enqueue(&repo, &cfg, &mut q, b, snap.get(b).map(String::as_str), sha, t);
+                if enqueue(&repo, &cfg, &mut q, b, snap.get(b).map(String::as_str), sha, t) == Enqueued::MergedOnly {
+                    if let Some(w) = merged_only_watch(&repo, &cfg, b, sha, t) { watches.insert(b.clone(), w); }
+                }
                 changed = true;
             }
             for b in snap.keys().filter(|b| !next.contains_key(*b)) { q.remove(b); changed = true; }
@@ -333,7 +335,11 @@ pub fn run(repo: Repo) {
                         },
                         Kind::FixChecks => fix_checks_done(&repo, &cfg, &mut q, &mut st, j, status),
                         Kind::Review | Kind::Ci => if let Some((b, w)) = finish(&repo, &cfg, &mut q, &mut st, &mut ci_due, j, t) {
-                            watches.insert(b, w);
+                            match watches.get_mut(&b) {
+                                // A merge-only push landed while this ran: its watch keeps the newer head, with these counts.
+                                Some(o) if o.head != w.head && repo.is_ancestor(&w.head, &o.head) => (o.important, o.refused) = (w.important, w.refused),
+                                _ => { watches.insert(b, w); }
+                            }
                         },
                     }
                     changed = true;
@@ -377,7 +383,7 @@ pub fn run(repo: Repo) {
                     }
                 }
                 Some(github::CiState::Passed) => {
-                    // A watch only exists once its head's review is recorded (finish), so the count is always known.
+                    // A watch only exists once its head's review state is known (finish, or a merge-only push), so the count is always known.
                     announce(&repo, b, &ci_verdict(b, &w.head, w.pr, w.important, w.refused), w.pr);
                     w.since = 0;
                 }
@@ -458,17 +464,24 @@ pub fn run(repo: Repo) {
     }
 }
 
-fn enqueue(repo: &Repo, cfg: &Config, q: &mut Queue, b: &str, old: Option<&str>, sha: &str, t: u64) {
-    let Some(mut base) = repo.range(old, sha, &cfg.branches.base) else { log!("{b}: no range, skipped"); return };
-    // Code merged in from another branch was reviewed there: review from the merge (spec C1).
-    if let Some((m, via)) = old.filter(|o| *o == base).and_then(|o| repo.merged_in(o, sha, b)) {
-        if m == sha { log!("{b}: only merges {via} @{}, already reviewed there; skipped", &sha[..7]); return; }
+/// What `enqueue` did with a push.
+#[derive(Debug, PartialEq)]
+enum Enqueued { Queued, Skipped, MergedOnly }
+
+fn enqueue(repo: &Repo, cfg: &Config, q: &mut Queue, b: &str, old: Option<&str>, sha: &str, t: u64) -> Enqueued {
+    let Some(mut base) = repo.range(old, sha, &cfg.branches.base) else { log!("{b}: no range, skipped"); return Enqueued::Skipped };
+    // Code merged in from another branch was reviewed there: review from the merge (spec C1). Not onto a pending
+    // review: its range still holds this branch's own unreviewed commits, so it keeps its base and moves to `sha`.
+    let pending = q.entries.contains_key(b);
+    if let Some((m, via)) = old.filter(|o| *o == base && !pending).and_then(|o| repo.merged_in(o, sha, b)) {
+        if m == sha { log!("{b}: only merges {via} @{}, already reviewed there; skipped", &sha[..7]); return Enqueued::MergedOnly; }
         log!("{b}: reviewing from merge {} ({via}'s code was reviewed there)", &m[..7]);
         base = m;
     }
     let files = repo.numstat(&base, sha);
-    if files.iter().all(|(_, _, p)| filter::is_generated(cfg, p)) { log!("{b}: nothing reviewable (empty or generated-only), skipped"); return; }
+    if files.iter().all(|(_, _, p)| filter::is_generated(cfg, p)) { log!("{b}: nothing reviewable (empty or generated-only), skipped"); return Enqueued::Skipped; }
     q.push(b, &base, sha, t, &|a, b| repo.is_ancestor(a, b));
+    Enqueued::Queued
 }
 
 /// `revaiw now`: the whole branch against the base branch, whatever is pending or running. False when nothing is
@@ -887,19 +900,9 @@ fn finish(repo: &Repo, cfg: &Config, q: &mut Queue, st: &mut Status, ci_due: &mu
             if unread > 0 {
                 log!("{}: ⚠️ partial review @{}, /code-review {} (see the review comment)", j.branch, &j.entry.head[..7], o.gaps());
             }
-            if is_review && !ci {
-                if unread > 0 { return None; }
-                // No GitHub CI for this head (not on `ci.branches`, no open PR into `ci.pr_bases`): the review is
-                // the whole remote verdict. Same wording as the CI-green lines below, so review-watch reads it the same way.
-                let at = format!("@{}{}", &j.entry.head[..7], pr.map(|n| format!(" #{n}")).unwrap_or_default());
-                match important {
-                    0 => announce(repo, &j.branch, &format!("{}: ✅ ready to merge {at} (review clean; no GitHub CI for this branch)", j.branch), pr),
-                    n => log!("{}: review done @{}, {n} important still open", j.branch, &j.entry.head[..7]),
-                }
-                return None;
-            }
-            is_review.then(|| (j.branch.clone(), CiWatch { head: j.entry.head.clone(), told_skipped: false, since: t, polled: t,
-                                                          important, refused: unread, pr }))
+            if !is_review { return None; }
+            let w = CiWatch { head: j.entry.head.clone(), told_skipped: false, since: t, polled: t, important, refused: unread, pr };
+            watch_or_verdict(repo, &j.branch, w, ci).map(|w| (j.branch.clone(), w))
         }
         review::Outcome::UsageLimit(until) => {
             log!("{}: usage limit, paused until {until}", j.branch);
@@ -917,6 +920,29 @@ fn finish(repo: &Repo, cfg: &Config, q: &mut Queue, st: &mut Status, ci_due: &mu
             None
         }
     }
+}
+
+/// `w`, a head whose review state is known: kept to watch its GitHub CI, or, when none applies (not on
+/// `ci.branches`, no open PR into `ci.pr_bases`), the verdict now, since the review is the whole remote verdict. Same
+/// wording as `ci_verdict`, so review-watch reads both the same way. A partial review gets no verdict.
+fn watch_or_verdict(repo: &Repo, b: &str, w: CiWatch, ci: bool) -> Option<CiWatch> {
+    if ci { return Some(w); }
+    if w.refused > 0 { return None; }
+    let at = format!("@{}{}", &w.head[..7], w.pr.map(|n| format!(" #{n}")).unwrap_or_default());
+    match w.important {
+        0 => announce(repo, b, &format!("{b}: ✅ ready to merge {at} (review clean; no GitHub CI for this branch)"), w.pr),
+        n => log!("{b}: review done @{}, {n} important still open", &w.head[..7]),
+    }
+    None
+}
+
+/// A merge-only push (`Enqueued::MergedOnly`) is not reviewed, but its head still gets the CI verdict, from the
+/// branch's open findings as they stand.
+fn merged_only_watch(repo: &Repo, cfg: &Config, b: &str, head: &str, t: u64) -> Option<CiWatch> {
+    let important = Ledger::load(&ledger_path(repo, b)).open().iter().filter(|(_, e)| e.f.severity == "important").count();
+    let pr = github::pr_for(b).map(|p| p.number);
+    let ci = filter::ci_expected_after_lookup(cfg, b, github::open_pr_base(b).as_ref().map(|b| b.as_deref()).map_err(|_| ()));
+    watch_or_verdict(repo, b, CiWatch { head: head.into(), told_skipped: false, since: t, polled: t, important, refused: 0, pr }, ci)
 }
 
 /// Where a run's time went: push → start (the debounce plus any queue), the CLI run, and the GitHub posting.
@@ -1276,6 +1302,70 @@ mod tests {
         let repo = crate::git::Repo { root: "/r".into(), common: "/r/.git".into(), remote: "origin".into() };
         assert_eq!(super::state_dir(&repo), std::path::PathBuf::from("/r/.git/revaiw"));
         assert_eq!(crate::render::MARKER, "<!-- revaiw -->");
+    }
+    fn git(dir: &std::path::Path, args: &[&str]) -> String {
+        let o = std::process::Command::new("git").arg("-C").arg(dir).args(args)
+            .env("GIT_AUTHOR_NAME", "t").env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t").env("GIT_COMMITTER_EMAIL", "t@t")
+            .output().unwrap();
+        assert!(o.status.success(), "{:?}", String::from_utf8_lossy(&o.stderr));
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    }
+    fn commit(dir: &std::path::Path, file: &str) -> String {
+        std::fs::write(dir.join(file), format!("{file}\n")).unwrap();
+        git(dir, &["add", "."]);
+        git(dir, &["commit", "-qm", file]);
+        git(dir, &["rev-parse", "HEAD"])
+    }
+    /// `feat/k` pushed at `h1` (its own work over `base`), then `uat` moved on and merged in at `m`, not yet pushed.
+    fn merged_uat() -> (tempfile::TempDir, crate::git::Repo, crate::config::Config, [String; 3]) {
+        let t = tempfile::tempdir().unwrap();
+        let d = t.path();
+        git(d, &["init", "-q", "-b", "uat"]);
+        git(d, &["remote", "add", "origiin", "/nonexistent"]);
+        let base = commit(d, "a.txt");
+        git(d, &["checkout", "-qb", "feat/k"]);
+        let h1 = commit(d, "k.txt");
+        git(d, &["update-ref", "refs/remotes/origiin/feat/k", &h1]);
+        git(d, &["checkout", "-q", "uat"]);
+        let u = commit(d, "u.txt");
+        git(d, &["update-ref", "refs/remotes/origiin/uat", &u]);
+        git(d, &["checkout", "-q", "feat/k"]);
+        git(d, &["merge", "-q", "--no-edit", "uat"]);
+        let m = git(d, &["rev-parse", "HEAD"]);
+        let mut cfg = crate::config::Config::default();
+        cfg.branches.base = "uat".into();
+        let repo = crate::git::Repo::discover(d).unwrap();
+        (t, repo, cfg, [base, h1, m])
+    }
+    #[test] fn a_push_that_only_merges_reviewed_code_is_not_queued_but_reported() {
+        let (_t, repo, cfg, [_, h1, m]) = merged_uat();
+        let mut q = crate::queue::Queue::default();
+        assert_eq!(super::enqueue(&repo, &cfg, &mut q, "feat/k", Some(&h1), &m, 100), super::Enqueued::MergedOnly);
+        assert!(q.entries.is_empty());
+    }
+    #[test] fn a_merge_only_push_onto_a_pending_review_moves_its_head() {
+        let (_t, repo, cfg, [base, h1, m]) = merged_uat();
+        let mut q = crate::queue::Queue::default();
+        q.push("feat/k", &base, &h1, 50, &|a, b| repo.is_ancestor(a, b));
+        assert_eq!(super::enqueue(&repo, &cfg, &mut q, "feat/k", Some(&h1), &m, 100), super::Enqueued::Queued);
+        let e = &q.entries["feat/k"];
+        assert_eq!((e.base.as_str(), e.head.as_str()), (base.as_str(), m.as_str()), "the unreviewed h1 is still in range");
+    }
+    #[test] fn a_head_with_ci_keeps_its_watch_and_a_partial_one_without_ci_gets_no_verdict() {
+        let (_t, repo, _, [_, _, m]) = merged_uat();
+        let w = |refused| super::CiWatch { head: m.clone(), told_skipped: false, since: 1, polled: 1, important: 2, refused, pr: Some(7) };
+        let kept = super::watch_or_verdict(&repo, "feat/k", w(0), true).expect("CI applies: watched");
+        assert_eq!((kept.head.as_str(), kept.important, kept.pr), (m.as_str(), 2, Some(7)));
+        assert!(super::watch_or_verdict(&repo, "feat/k", w(1), false).is_none());
+    }
+    #[test] fn own_work_after_a_merge_is_queued_from_the_merge() {
+        let (t, repo, cfg, [_, h1, m]) = merged_uat();
+        let h2 = commit(t.path(), "k2.txt");
+        let mut q = crate::queue::Queue::default();
+        assert_eq!(super::enqueue(&repo, &cfg, &mut q, "feat/k", Some(&h1), &h2, 100), super::Enqueued::Queued);
+        let e = &q.entries["feat/k"];
+        assert_eq!((e.base.as_str(), e.head.as_str()), (m.as_str(), h2.as_str()));
     }
     #[test] fn rulings_count_only_from_a_writer() {
         for p in ["write", "admin", "maintain", " write\n"] {
