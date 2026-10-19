@@ -90,7 +90,7 @@ pub fn summary(c: &Ctx) -> String {
         for e in &imp { s += &finding_block(e, true); }
     }
     if c.follow_up && !nits.is_empty() {
-        let _ = writeln!(s, "🟡 {} from earlier reviews (see the first review's comment)\n", plural(nits.len(), "nit"));
+        let _ = writeln!(s, "🟡 {} from earlier reviews (see the ledger or an earlier review)\n", plural(nits.len(), "nit"));
     }
     let nits = if c.follow_up { vec![] } else { nits };
     for (list, label) in [(&nits, "🟡 ".to_string() + &plural(nits.len(), "nit")),
@@ -159,10 +159,21 @@ mod tests {
         let out = ReviewOutput::default();
         let s = summary(&Ctx { title: "🐇 Review", branch: "b", base: "a", head: "h", model: "m", effort: "e", reason: "r",
                                out: &out, ledger: &l, fixed_now: &[], engine: None, follow_up: true });
-        assert!(s.contains("1 nit from earlier reviews") && !s.contains("old nit"), "{s}");
+        assert!(s.contains("🟡 1 nit from earlier reviews (see the ledger or an earlier review)") && !s.contains("old nit"), "{s}");
         let full = summary(&Ctx { title: "🐇 Review", branch: "b", base: "a", head: "h", model: "m", effort: "e", reason: "r",
                                   out: &out, ledger: &l, fixed_now: &[], engine: None, follow_up: false });
         assert!(full.contains("old nit"), "{full}");
+        l.merge(&ReviewOutput { findings: vec![fnd("nit", "old nit"), fnd("nit", "another")], ..Default::default() }, "s2");
+        let two = summary(&Ctx { title: "🐇 Review", branch: "b", base: "a", head: "h", model: "m", effort: "e", reason: "r",
+                                 out: &out, ledger: &l, fixed_now: &[], engine: None, follow_up: true });
+        assert!(two.contains("🟡 2 nits from earlier reviews"), "{two}");
+    }
+    #[test] fn a_follow_up_with_no_open_nits_has_no_nit_line() {
+        let mut l = Ledger::default();
+        l.merge(&ReviewOutput { findings: vec![fnd("important", "bug")], ..Default::default() }, "s1");
+        let s = summary(&Ctx { title: "🐇 Review", branch: "b", base: "a", head: "h", model: "m", effort: "e", reason: "r",
+                               out: &ReviewOutput::default(), ledger: &l, fixed_now: &[], engine: None, follow_up: true });
+        assert!(!s.contains("🟡"), "{s}");
     }
     #[test] fn fence_outgrows_content() {
         assert_eq!(fence("plain"), "```");
