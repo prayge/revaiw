@@ -11,8 +11,10 @@ pub struct Route {
 }
 
 /// Small model by default; the medium one for large or risky ranges; the large one for very large ranges or ones
-/// on `routing.opus_paths`. Decided from git alone, no model call.
-pub fn route(c: &Config, files: &[(u32, u32, String)], messages: &str) -> Route {
+/// on `routing.opus_paths`. Decided from git alone, no model call. A follow-up (fixing open findings) goes to the
+/// medium model for `opus_paths`: the large model on every fix push found edges of edges (spec C4). The size rules
+/// still apply.
+pub fn route(c: &Config, files: &[(u32, u32, String)], messages: &str, follow_up: bool) -> Route {
     let real: Vec<_> = files.iter().filter(|(_, _, p)| !is_generated(c, p)).collect();
     let lines: u32 = real.iter().map(|(a, d, _)| a + d).sum();
     let large = |reason: String| Route { model: c.models.large.clone(), effort: "high", level: "medium", reason };
@@ -21,7 +23,9 @@ pub fn route(c: &Config, files: &[(u32, u32, String)], messages: &str) -> Route 
         .find(|p| pats.iter().any(|pat| path_matches(pat, p))).cloned();
     if lines > 1500 { return large(format!("{lines} lines")); }
     if real.len() > 40 { return large(format!("{} files", real.len())); }
-    if let Some(p) = touching(&c.routing.opus_paths) { return large(format!("touches {p}")); }
+    if let Some(p) = touching(&c.routing.opus_paths) {
+        return if follow_up { medium(format!("follow-up, touches {p}")) } else { large(format!("touches {p}")) };
+    }
     if lines > 400 { return medium(format!("{lines} lines")); }
     if real.len() > 15 { return medium(format!("{} files", real.len())); }
     if let Some(p) = touching(&c.routing.sonnet_paths) { return medium(format!("touches {p}")); }
@@ -91,9 +95,9 @@ mod tests {
     fn c() -> Config { resolve(Config::default(), "main") }
     fn f(a: u32, p: &str) -> (u32, u32, String) { (a, 0, p.to_string()) }
     #[test] fn each_tier_runs_code_review_at_its_level() {
-        assert_eq!(route(&c(), &[f(30, "apps/a.tsx")], "").level, "low");
-        assert_eq!(route(&c(), &[f(401, "a.ts")], "").level, "medium");
-        assert_eq!(route(&c(), &[f(1501, "a.ts")], "").level, "medium", "Opus runs at medium, for usage");
+        assert_eq!(route(&c(), &[f(30, "apps/a.tsx")], "", false).level, "low");
+        assert_eq!(route(&c(), &[f(401, "a.ts")], "", false).level, "medium");
+        assert_eq!(route(&c(), &[f(1501, "a.ts")], "", false).level, "medium", "Opus runs at medium, for usage");
         assert_eq!(pinned(&c(), "sonnet").unwrap().level, "medium");
         assert_eq!(pinned(&c(), "haiku").unwrap().level, "low");
         assert_eq!(pinned(&c(), "opus").unwrap().level, "medium");
@@ -128,54 +132,61 @@ mod tests {
         assert!(a(&["--model=gpt"]).is_err());
     }
     #[test] fn small_goes_haiku() {
-        let r = route(&c(), &[f(30, "apps/platform/src/a.tsx")], "tweak copy");
+        let r = route(&c(), &[f(30, "apps/platform/src/a.tsx")], "tweak copy", false);
         assert_eq!((r.model.as_str(), r.effort), (HAIKU, "high"));
     }
     #[test] fn huge_or_high_risk_goes_opus() {
-        let r = route(&c(), &[f(1501, "a.ts")], "");
+        let r = route(&c(), &[f(1501, "a.ts")], "", false);
         assert_eq!((r.model.as_str(), r.effort), (OPUS, "high"));
         let many: Vec<_> = (0..41).map(|i| f(1, &format!("f{i}.ts"))).collect();
-        assert_eq!(route(&c(), &many, "").model, OPUS);
+        assert_eq!(route(&c(), &many, "", false).model, OPUS);
         for p in ["packages/database/prisma/schema.prisma", "packages/database/prisma/migrations/1/migration.sql",
                   "apps/backend/src/auth/session.ts", "apps/backend/src/services/billing/x.ts",
                   "apps/backend/src/stripe/x.ts", "packages/database/sql/rls_policies.sql"] {
-            assert_eq!(route(&c(), &[f(1, p)], "").model, OPUS, "{p}");
+            assert_eq!(route(&c(), &[f(1, p)], "", false).model, OPUS, "{p}");
         }
-        assert_eq!(route(&c(), &[f(1500, "a.ts")], "").model, SONNET);
+        assert_eq!(route(&c(), &[f(1500, "a.ts")], "", false).model, SONNET);
+    }
+    #[test] fn a_follow_up_on_a_risky_path_runs_on_the_medium_model() {
+        let r = route(&c(), &[f(10, "apps/api/billing/x.ts")], "", true);
+        assert_eq!(r.model, SONNET, "{}", r.reason);
+        assert!(r.reason.contains("follow-up"), "{}", r.reason);
+        assert_eq!(route(&c(), &[f(10, "apps/api/billing/x.ts")], "", false).model, OPUS, "a first review still gets Opus");
+        assert_eq!(route(&c(), &[f(1501, "a.ts")], "", true).model, OPUS, "a huge follow-up is a new review");
     }
     #[test] fn big_goes_sonnet() {
-        assert_eq!(route(&c(), &[f(401, "a.ts")], "").model, SONNET);
+        assert_eq!(route(&c(), &[f(401, "a.ts")], "", false).model, SONNET);
         let many: Vec<_> = (0..16).map(|i| f(1, &format!("f{i}.ts"))).collect();
-        assert_eq!(route(&c(), &many, "").model, SONNET);
+        assert_eq!(route(&c(), &many, "", false).model, SONNET);
     }
     #[test] fn generated_lines_do_not_count() {
-        assert_eq!(route(&c(), &[f(5000, "graphify-out/graph.json"), f(3, "a.ts")], "").model, HAIKU);
+        assert_eq!(route(&c(), &[f(5000, "graphify-out/graph.json"), f(3, "a.ts")], "", false).model, HAIKU);
     }
     #[test] fn risk_paths() {
         for p in ["packages/database/src/validations/partner/x.ts", "apps/backend/src/connectors/meta.ts",
                   "apps/backend/src/integrations/google.ts", ".github/workflows/ci.yml", "infra/scripts/x.mts"] {
-            assert_eq!(route(&c(), &[f(1, p)], "").model, SONNET, "{p}");
+            assert_eq!(route(&c(), &[f(1, p)], "", false).model, SONNET, "{p}");
         }
-        assert_eq!(route(&c(), &[f(1, "apps/landing/src/urls.ts")], "").model, HAIKU);
+        assert_eq!(route(&c(), &[f(1, "apps/landing/src/urls.ts")], "", false).model, HAIKU);
     }
     #[test] fn risk_words_in_commits() {
-        let r = route(&c(), &[f(1, "a.ts")], "fix: Migration ordering");
+        let r = route(&c(), &[f(1, "a.ts")], "fix: Migration ordering", false);
         assert_eq!(r.model, SONNET);
         assert!(r.reason.contains("migration"));
-        assert_eq!(route(&c(), &[f(1, "a.ts")], "authority label").model, HAIKU);
+        assert_eq!(route(&c(), &[f(1, "a.ts")], "authority label", false).model, HAIKU);
     }
     #[test] fn a_configured_risk_word_matches_whatever_its_case() {
         let mut cfg = c();
         cfg.routing.risk_words = vec!["Payment".into()];
-        assert_eq!(route(&cfg, &[f(1, "a.ts")], "fix payment retry").model, cfg.models.medium);
+        assert_eq!(route(&cfg, &[f(1, "a.ts")], "fix payment retry", false).model, cfg.models.medium);
     }
     #[test] fn config_sets_risk_paths_words_and_models() {
         let mut cfg = c();
         cfg.routing.sonnet_paths.push("/graph/public/".into());
         cfg.routing.risk_words = vec!["odds".into()];
         cfg.models.medium = "m".into();
-        assert_eq!(route(&cfg, &[f(1, "packages/database/src/graph/public/operations.ts")], "").model, "m");
-        assert_eq!(route(&cfg, &[f(1, "a.ts")], "fix odds rounding").model, "m");
-        assert_eq!(route(&cfg, &[f(1, "a.ts")], "migration").model, HAIKU, "the list replaces the defaults");
+        assert_eq!(route(&cfg, &[f(1, "packages/database/src/graph/public/operations.ts")], "", false).model, "m");
+        assert_eq!(route(&cfg, &[f(1, "a.ts")], "fix odds rounding", false).model, "m");
+        assert_eq!(route(&cfg, &[f(1, "a.ts")], "migration", false).model, HAIKU, "the list replaces the defaults");
     }
 }

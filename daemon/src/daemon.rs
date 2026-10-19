@@ -510,8 +510,9 @@ fn run_tag(b: &str, head: &str) -> String {
 /// the engine.
 fn start(repo: &Repo, cfg: &Config, b: &str, e: Entry) -> Option<Job> {
     let files = repo.numstat(&e.base, &e.head);
+    let fu = follow_up(&Ledger::load(&ledger_path(repo, b)), &e);
     let route = e.model.as_deref().and_then(|t| route::pinned(cfg, t))
-        .unwrap_or_else(|| route::route(cfg, &files, &repo.messages(&e.base, &e.head)));
+        .unwrap_or_else(|| route::route(cfg, &files, &repo.messages(&e.base, &e.head), fu));
     let runs = state_dir(repo).join("runs");
     let wt = runs.join(format!("wt-{}", run_tag(b, &e.head)));
     // Steer files from the trunk, never `e.base`: for a follow-up push that is the PR's own previous commit.
