@@ -207,6 +207,8 @@ pub fn run(repo: Repo) {
     };
     let mut jobs: Vec<Job> = vec![];
     let mut watches: std::collections::BTreeMap<String, CiWatch> = Default::default();
+    // Merge-only heads pushed while their branch's review ran: that review's verdict is for them.
+    let mut merged_behind: std::collections::BTreeMap<String, String> = Default::default();
     let mut ci_due: Vec<CiJob> = vec![];
     // Fixes whose engine is done and change is guarded, waiting for the resource guard to allow their checks child.
     let mut pending_checks: Vec<Job> = vec![];
@@ -246,8 +248,11 @@ pub fn run(repo: Repo) {
           if let Some(next) = repo.snapshot() {
             for (b, sha) in &next {
                 if snap.get(b) == Some(sha) || filter::skip_branch(&cfg, b) || !cfg.triggers.push { continue; }
-                if enqueue(&repo, &cfg, &mut q, b, snap.get(b).map(String::as_str), sha, t) == Enqueued::MergedOnly {
-                    if let Some(w) = merged_only_watch(&repo, &cfg, b, sha, t) { watches.insert(b.clone(), w); }
+                match enqueue(&repo, &cfg, &mut q, b, snap.get(b).map(String::as_str), sha, t) {
+                    Enqueued::MergedOnly => if let Some(w) = merged_only_watch(&repo, &cfg, b, sha, t) { watches.insert(b.clone(), w); },
+                    Enqueued::MergedBehindRun => { merged_behind.insert(b.clone(), sha.clone()); }
+                    Enqueued::Queued => { merged_behind.remove(b); }
+                    Enqueued::Skipped => {}
                 }
                 changed = true;
             }
@@ -334,12 +339,9 @@ pub fn run(repo: Repo) {
                             pending_checks.push(next);
                         },
                         Kind::FixChecks => fix_checks_done(&repo, &cfg, &mut q, &mut st, j, status),
-                        Kind::Review | Kind::Ci => if let Some((b, w)) = finish(&repo, &cfg, &mut q, &mut st, &mut ci_due, j, t) {
-                            match watches.get_mut(&b) {
-                                // A merge-only push landed while this ran: its watch keeps the newer head, with these counts.
-                                Some(o) if o.head != w.head && repo.is_ancestor(&w.head, &o.head) => (o.important, o.refused) = (w.important, w.refused),
-                                _ => { watches.insert(b, w); }
-                            }
+                        Kind::Review | Kind::Ci => if let Some((b, mut w, ci)) = finish(&repo, &cfg, &mut q, &mut st, &mut ci_due, j, t) {
+                            w.head = verdict_head(&w.head, merged_behind.remove(&b), &|a, b| repo.is_ancestor(a, b));
+                            if let Some(w) = watch_or_verdict(&repo, &b, w, ci) { watches.insert(b, w); }
                         },
                     }
                     changed = true;
@@ -465,9 +467,11 @@ pub fn run(repo: Repo) {
     }
 }
 
-/// What `enqueue` did with a push.
+/// What `enqueue` did with a push. `MergedOnly`: a merge of reviewed code, not reviewed; its head gets its CI verdict
+/// now. `MergedBehindRun`: the same while the branch's review of an earlier head runs; that review's verdict is for
+/// this head (`verdict_head`), since its counts are the fresh ones.
 #[derive(Debug, PartialEq)]
-enum Enqueued { Queued, Skipped, MergedOnly }
+enum Enqueued { Queued, Skipped, MergedOnly, MergedBehindRun }
 
 fn enqueue(repo: &Repo, cfg: &Config, q: &mut Queue, b: &str, old: Option<&str>, sha: &str, t: u64) -> Enqueued {
     let Some(mut base) = repo.range(old, sha, &cfg.branches.base) else { log!("{b}: no range, skipped"); return Enqueued::Skipped };
@@ -475,9 +479,19 @@ fn enqueue(repo: &Repo, cfg: &Config, q: &mut Queue, b: &str, old: Option<&str>,
     // review: its range still holds this branch's own unreviewed commits, so it keeps its base and moves to `sha`.
     let pending = q.entries.contains_key(b);
     if let Some((m, via)) = old.filter(|o| *o == base && !pending).and_then(|o| repo.merged_in(o, sha, b)) {
-        if m == sha { log!("{b}: only merges {via} @{}, already reviewed there; skipped", &sha[..7]); return Enqueued::MergedOnly; }
-        log!("{b}: reviewing from merge {} ({via}'s code was reviewed there)", &m[..7]);
-        base = m;
+        if m != sha {
+            log!("{b}: reviewing from merge {} ({via}'s code was reviewed there)", &m[..7]);
+            base = m;
+        } else if Ledger::load(&ledger_path(repo, b)).reviews == 0 {
+            // Nothing of this branch was reviewed yet (pushed before the daemon ran): a ✅ must not come from an
+            // empty ledger, so the branch gets its first review.
+            log!("{b}: only merges {via} @{}, but the branch has no review yet; reviewing it", &sha[..7]);
+            if let Some(whole) = repo.range(None, sha, &cfg.branches.base) { base = whole; }
+        } else {
+            log!("{b}: only merges {via} @{}, already reviewed there; skipped", &sha[..7]);
+            let behind = q.running.get(b).is_some_and(|r| repo.is_ancestor(&r.head, sha));
+            return if behind { Enqueued::MergedBehindRun } else { Enqueued::MergedOnly };
+        }
     }
     let files = repo.numstat(&base, sha);
     if files.iter().all(|(_, _, p)| filter::is_generated(cfg, p)) { log!("{b}: nothing reviewable (empty or generated-only), skipped"); return Enqueued::Skipped; }
@@ -881,9 +895,10 @@ fn ledger_path(repo: &Repo, b: &str) -> PathBuf {
     repo.root.join(".reviews").join(b).join("ledger.json")
 }
 
-/// Returns a CI watch for a completed review, so its Actions runs are checked once they finish.
+/// Returns a recorded review's CI watch and whether GitHub CI applies, for `watch_or_verdict` once the caller has
+/// picked the head it is for (`verdict_head`).
 fn finish(repo: &Repo, cfg: &Config, q: &mut Queue, st: &mut Status, ci_due: &mut Vec<CiJob>, mut j: Job, t: u64)
-    -> Option<(String, CiWatch)> {
+    -> Option<(String, CiWatch, bool)> {
     st.running.retain(|r| !(r.branch == j.branch && r.pid == j.child.id()));
     if let Some(wt) = &j.worktree { cleanup(repo, wt); }
     let raw = fs::read_to_string(&j.out).unwrap_or_default();
@@ -903,7 +918,7 @@ fn finish(repo: &Repo, cfg: &Config, q: &mut Queue, st: &mut Status, ci_due: &mu
             }
             if !is_review { return None; }
             let w = CiWatch { head: j.entry.head.clone(), told_skipped: false, since: t, polled: t, important, refused: unread, pr };
-            watch_or_verdict(repo, &j.branch, w, ci).map(|w| (j.branch.clone(), w))
+            Some((j.branch.clone(), w, ci))
         }
         review::Outcome::UsageLimit(until) => {
             log!("{}: usage limit, paused until {until}", j.branch);
@@ -944,6 +959,12 @@ fn merged_only_watch(repo: &Repo, cfg: &Config, b: &str, head: &str, t: u64) -> 
     let pr = github::pr_for(b).map(|p| p.number);
     let ci = filter::ci_expected_after_lookup(cfg, b, github::open_pr_base(b).as_ref().map(|b| b.as_deref()).map_err(|_| ()));
     watch_or_verdict(repo, b, CiWatch { head: head.into(), told_skipped: false, since: t, polled: t, important, refused: 0, pr }, ci)
+}
+
+/// The head a finished review's watch or verdict is for: the merge-only push that landed while it ran
+/// (`Enqueued::MergedBehindRun`) when the reviewed head is in it, else the reviewed head.
+fn verdict_head(head: &str, merged: Option<String>, is_ancestor: &dyn Fn(&str, &str) -> bool) -> String {
+    merged.filter(|m| is_ancestor(head, m)).unwrap_or_else(|| head.into())
 }
 
 /// Where a run's time went: push → start (the debounce plus any queue), the CLI run, and the GitHub posting.
@@ -1088,10 +1109,11 @@ fn ci_verdict(branch: &str, head: &str, pr: Option<u64>, important: usize, refus
     }
 }
 
-/// Every failed run's log was read and is blank: GitHub could not run the jobs (billing, an outage), so there is
-/// nothing to diagnose (spec C6). A log gh could not fetch (None) is unknown, so it is diagnosed as before.
+/// Every failed run has no log: GitHub could not run the jobs (billing, an outage), so there is nothing to diagnose
+/// (spec C6). A fetch that failed (None) counts as no log: a billing-blocked run's jobs have no steps, and
+/// `gh run view --log-failed` on it exits 1 (HTTP 502) rather than printing an empty log.
 fn ci_logs_all_empty(logs: &[(String, Option<String>)]) -> bool {
-    !logs.is_empty() && logs.iter().all(|(_, log)| log.as_deref().is_some_and(|l| l.trim().is_empty()))
+    !logs.is_empty() && logs.iter().all(|(_, log)| log.as_deref().is_none_or(|l| l.trim().is_empty()))
 }
 
 /// Matches review-watch's "<b>: … failed …" row.
@@ -1148,11 +1170,12 @@ mod tests {
         // File deleted on a readable trunk: no error, defaults are the repo's.
         assert_eq!(super::next_config(&good, loaded(Config::default(), None, true)).0, Config::default());
     }
-    #[test] fn ci_logs_all_empty_only_when_every_log_is_read_and_blank() {
+    #[test] fn ci_logs_all_empty_when_every_log_is_blank_or_unfetchable() {
         let f = |logs: &[Option<&str>]| logs.iter().map(|l| ("check".to_string(), l.map(String::from))).collect::<Vec<_>>();
         assert!(super::ci_logs_all_empty(&f(&[Some(""), Some("  \n")])));
         assert!(!super::ci_logs_all_empty(&f(&[Some(""), Some("FAIL a.test.ts")])));
-        assert!(!super::ci_logs_all_empty(&f(&[Some(""), None])), "a log gh could not fetch is not an empty one");
+        assert!(super::ci_logs_all_empty(&f(&[Some(""), None])), "a billing-blocked run's log fetch fails (HTTP 502): no log");
+        assert!(!super::ci_logs_all_empty(&f(&[None, Some("FAIL a.test.ts")])));
         assert!(!super::ci_logs_all_empty(&[]), "no runs is not an outage");
     }
     #[test] fn an_empty_log_line_names_its_pr_and_reads_as_failed() {
@@ -1340,11 +1363,41 @@ mod tests {
         let repo = crate::git::Repo::discover(d).unwrap();
         (t, repo, cfg, [base, h1, m])
     }
+    /// The branch's ledger records one review (of `h1`).
+    fn reviewed(repo: &crate::git::Repo) {
+        let mut l = crate::ledger::Ledger::default();
+        l.merge(&crate::model::ReviewOutput::default(), "h1");
+        l.save(&super::ledger_path(repo, "feat/k"));
+    }
     #[test] fn a_push_that_only_merges_reviewed_code_is_not_queued_but_reported() {
         let (_t, repo, cfg, [_, h1, m]) = merged_uat();
+        reviewed(&repo);
         let mut q = crate::queue::Queue::default();
         assert_eq!(super::enqueue(&repo, &cfg, &mut q, "feat/k", Some(&h1), &m, 100), super::Enqueued::MergedOnly);
         assert!(q.entries.is_empty());
+    }
+    #[test] fn a_merge_only_push_onto_a_branch_never_reviewed_reviews_the_branch() {
+        let (_t, repo, cfg, [_, h1, m]) = merged_uat();
+        let mut q = crate::queue::Queue::default();
+        assert_eq!(super::enqueue(&repo, &cfg, &mut q, "feat/k", Some(&h1), &m, 100), super::Enqueued::Queued);
+        let e = &q.entries["feat/k"];
+        assert_eq!((Some(e.base.clone()), e.head.as_str()), (repo.range(None, &m, "uat"), m.as_str()), "the whole branch, h1 included");
+    }
+    #[test] fn a_merge_only_push_behind_a_running_review_waits_for_its_verdict() {
+        let (_t, repo, cfg, [base, h1, m]) = merged_uat();
+        reviewed(&repo);
+        let mut q = crate::queue::Queue::default();
+        q.push("feat/k", &base, &h1, 0, &|a, b| repo.is_ancestor(a, b));
+        q.take_eligible(1000, 0).unwrap();
+        assert_eq!(super::enqueue(&repo, &cfg, &mut q, "feat/k", Some(&h1), &m, 100), super::Enqueued::MergedBehindRun);
+        assert!(q.entries.is_empty());
+    }
+    #[test] fn a_finished_review_gives_its_verdict_for_the_merge_pushed_behind_it() {
+        let (_t, repo, _, [base, h1, m]) = merged_uat();
+        let anc = |a: &str, b: &str| repo.is_ancestor(a, b);
+        assert_eq!(super::verdict_head(&h1, Some(m.clone()), &anc), m, "h1 is in M: M's verdict, with h1's counts");
+        assert_eq!(super::verdict_head(&h1, None, &anc), h1);
+        assert_eq!(super::verdict_head(&m, Some(base), &anc), m, "a remembered head the review is not behind is ignored");
     }
     #[test] fn a_merge_only_push_onto_a_pending_review_moves_its_head() {
         let (_t, repo, cfg, [base, h1, m]) = merged_uat();
