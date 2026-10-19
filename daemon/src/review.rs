@@ -681,6 +681,8 @@ mod tests {
         // Haiku formats; it never vetoes the engine, and never calls a range with importants clean.
         assert!(FORMAT.contains("Never drop a finding") && FORMAT.contains("only when no finding is `important`"));
         assert!(FORMAT.contains("`incomplete`"));
+        assert!(FORMAT.contains("\"Settled decisions\" entry is kept as a `nit`"), "a settled match is demoted, never dropped");
+        assert!(FORMAT.contains("plus N similar") && !FORMAT.contains("keep at most 5 nits"), "extra nits are counted, not dropped");
         assert!(!SCHEMA.contains("\"read\"") && !SCHEMA.contains("\"unread\""), "coverage is the daemon's, from denials");
     }
     #[test] fn settled_block_quotes_rulings_and_lists_ledger_decisions() {
