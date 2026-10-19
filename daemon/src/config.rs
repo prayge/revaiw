@@ -28,6 +28,14 @@ pub struct Config {
     pub checks: Checks,
 }
 
+impl Config {
+    /// Branches a fix must never be pushed to: the base and the CI branches and PR bases, because a fix pushed to
+    /// one lands unreviewed on a trunk (a promotion PR's head is a trunk).
+    pub fn is_trunk(&self, branch: &str) -> bool {
+        branch == self.branches.base || self.ci.branches.iter().chain(&self.ci.pr_bases).any(|b| b == branch)
+    }
+}
+
 #[derive(Deserialize, Debug, Clone, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Branches {
@@ -270,6 +278,13 @@ mod tests {
     #[test] fn a_typo_is_an_error_not_a_silent_default() {
         assert!(parse("[fix]\nenable = true\n").unwrap_err().contains("enable"));
         assert!(parse("[fixes]\n").is_err());
+    }
+    #[test] fn trunks_are_the_base_the_ci_branches_and_the_pr_bases() {
+        let c = resolve(parse("[branches]\nbase = \"uat\"\n[ci]\nbranches = [\"master\"]\npr_bases = [\"prod\"]\n").unwrap(), "main");
+        for b in ["uat", "master", "prod"] { assert!(c.is_trunk(b), "{b}"); }
+        assert!(!c.is_trunk("main"), "the repo default is only a trunk when the config names it");
+        assert!(!c.is_trunk("feat/x") && !c.is_trunk("uat/x"));
+        assert!(resolve(Config::default(), "main").is_trunk("main"), "unset, the base is the repo default");
     }
     #[test] fn branch_patterns() {
         assert!(branch_matches("dependabot/*", "dependabot/npm/x"));

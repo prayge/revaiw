@@ -159,6 +159,9 @@ one.
 - **The push guard.** A fix pushes with `--force-with-lease` pinned to the reviewed head: it lands only while the
   remote branch is still exactly that commit, so it never overwrites a newer push, never resurrects commits an
   author force-pushed away, and never recreates a deleted branch.
+- **No fixes onto a trunk.** A PR whose head is the base branch or one of `ci.branches` / `ci.pr_bases` (a promotion
+  PR, `uat` into `master`) never gets a fix: the push would land there unreviewed. revaiw says so and asks for the fix
+  on a feature branch; 👎 dismissing still works.
 - **Project checks are the exception.** `checks.commands` run unsandboxed (see Config).
 
 ## Development

@@ -435,6 +435,8 @@ pub fn run(repo: Repo) {
             changed = true;
             // The request was gated on `fix.enabled` when it came in; the base's config may have turned it off since.
             if !cfg.fix.enabled { log!("{b}: fix requested by @{}, but fix.enabled is now off; dropped", f.login); q.finish(&b); continue; }
+            // Same for the trunk list: a request may predate the config that names this branch as one.
+            if cfg.is_trunk(&b) { log!("{b}: fix requested by @{}, but {b} is a trunk branch; dropped", f.login); q.finish(&b); continue; }
             match start_fix(&repo, &cfg, &b, f.clone(), &head) {
                 Some(j) => {
                     st.running.push(Run { branch: b.clone(), head: head.clone(), model: format!("fix:{}", cfg.fix.model),
