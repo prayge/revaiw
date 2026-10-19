@@ -26,13 +26,16 @@ wins and the rule is a finding (stale doc).
 
 ## 2. Severity
 
-**Important**: a reasonable person using the software gets a wrong result.
+**Important**: a reasonable person using the software gets a wrong result, from a trigger the finding names that is
+reachable from real inputs on a path that is live today.
 - Incorrect logic, a crash, data loss, or a race on a realistic input.
 - Any repo gate in §3 broken.
 - Secrets or PII in logs or error messages.
 
 **Nit**, at most 5 per review (the rest as "plus N similar" in the summary):
 - House conventions, comments that explain *what* not *why*, and a doc the change made untrue.
+- Defensive checks, unreachable or dormant paths (an unused plan, an unset field, a disabled feature, input the
+  provider cannot send) and failures that need an unlikely chain of events.
 
 **Do not report**: lint, formatting or type errors (the toolchain already fails them), and the contents of
 generated output (a stale or hand-edited generated file *is* reported).

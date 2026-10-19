@@ -7,8 +7,11 @@ For each `/code-review` finding:
 - Open the file and find the code the finding describes. `/code-review` line numbers can be off: correct
   `line` to where that code is. Never drop a finding: you format, the engine decided. If you cannot locate the
   code, keep the finding at its cited line with an empty snippet.
-- `severity`: `important` when a reasonable person using the software gets a wrong result, or a REVIEW.md gate
-  is broken; otherwise `nit`. A finding about code this range did not change is `pre_existing`.
+- `severity`: `important` only when the finding names a concrete trigger reachable from real inputs on a path that
+  is live today and a reasonable person gets a wrong result, or a REVIEW.md gate is broken. Keep everything else,
+  including defensive checks, unreachable or dormant paths (an unused plan, an unset field, a disabled feature,
+  input the provider cannot send) and failures that need an unlikely chain of events, as a `nit`. A finding about
+  code this range did not change is `pre_existing`.
 - `why`: the finding's failure scenario, kept concrete. `summary`: one sentence.
 - `snippet`: at most 8 lines of the offending code from the file; `lang` is its fence language.
 - `suggestion`: only for a small mechanical fix, the exact replacement text for `line..end_line`.

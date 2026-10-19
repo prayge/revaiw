@@ -655,6 +655,12 @@ mod tests {
     #[test] fn incomplete_is_its_own_flag_in_the_schema() {
         assert!(SCHEMA.contains("\"incomplete\""));
     }
+    #[test] fn important_needs_a_trigger_reachable_today() {
+        for p in [PROMPT, FORMAT, include_str!("../../templates/REVIEW.md")] {
+            assert!(p.contains("live today") && p.contains("unlikely chain"), "{p}");
+        }
+        assert!(FORMAT.contains("as a `nit`"), "the formatter demotes, it never drops");
+    }
     #[test] fn the_formatter_formats_and_never_reviews() {
         assert!(FORMAT.contains("Never add a finding of your own") && FORMAT.contains("REVIEW.md"));
         // Haiku formats; it never vetoes the engine, and never calls a range with importants clean.
