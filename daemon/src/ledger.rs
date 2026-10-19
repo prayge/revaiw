@@ -50,7 +50,7 @@ pub fn demote_outside(out: &mut ReviewOutput, changed: &std::collections::HashSe
 
 /// Decisions already made on any branch (spec C3): dismissed or deferred findings with a reason, from every ledger
 /// under `reviews` (`.reviews/<branch>/ledger.json`, branch names nest), for `files`. A ruling made on one branch
-/// then holds on the branch it merges into. At most 30, deduped by file and summary.
+/// then holds on the branch it merges into. At most 30, deduped by file and summary, one line each (whitespace collapsed).
 pub fn settled(reviews: &Path, files: &[String]) -> Vec<String> {
     let mut out: Vec<String> = vec![];
     let mut seen = std::collections::HashSet::new();
@@ -68,9 +68,9 @@ pub fn settled(reviews: &Path, files: &[String]) -> Vec<String> {
             for e in Ledger::load(&p).findings.values() {
                 let Some(why) = e.decision_reason.as_deref() else { continue };
                 if !matches!(e.status.as_str(), "dismissed" | "deferred") || !files.contains(&e.f.file) { continue; }
-                let norm = e.f.summary.to_lowercase().split_whitespace().collect::<Vec<_>>().join(" ");
-                if seen.insert((e.f.file.clone(), norm)) {
-                    out.push(format!("- `{}:{}` {} — {}: {why}", e.f.file, e.f.line, e.f.summary, e.status));
+                let flat = |t: &str| t.split_whitespace().collect::<Vec<_>>().join(" ");
+                if seen.insert((e.f.file.clone(), flat(&e.f.summary.to_lowercase()))) {
+                    out.push(format!("- `{}:{}` {} — {}: {}", e.f.file, e.f.line, flat(&e.f.summary), e.status, flat(why)));
                     if out.len() == 30 { return out; }
                 }
             }
@@ -421,6 +421,13 @@ mod tests {
         assert_eq!(got.len(), 2, "{got:?}");
         assert!(got.iter().any(|g| g.contains("`a.ts:1` y ") && g.contains("dismissed")), "{got:?}");
         assert!(got.iter().any(|g| g.contains(" z ") && g.contains("deferred")), "{got:?}");
+    }
+    #[test] fn a_multi_line_summary_or_reason_stays_on_its_settled_line() {
+        let d = tempfile::tempdir().unwrap();
+        let mut l = Ledger::default();
+        decided(&mut l, fnd("a.ts", "x can\n  be null"), "dismissed", Some("by\n\ndesign\t here"));
+        l.save(&d.path().join("b/ledger.json"));
+        assert_eq!(settled(d.path(), &["a.ts".to_string()]), vec!["- `a.ts:1` x can be null — dismissed: by design here".to_string()]);
     }
     #[test] fn settled_stops_at_thirty() {
         let d = tempfile::tempdir().unwrap();
