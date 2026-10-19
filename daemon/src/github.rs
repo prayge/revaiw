@@ -457,7 +457,7 @@ mod tests {
         use crate::{ledger::Ledger, model::ReviewOutput, render::{summary, Ctx}};
         let (l, out) = (Ledger::default(), ReviewOutput::default());
         let body = |title: &str| summary(&Ctx { title, branch: "b", base: "a", head: "h", model: "m", effort: "e", reason: "r",
-                                                  out: &out, ledger: &l, fixed_now: &[], engine: None });
+                                                  out: &out, ledger: &l, fixed_now: &[], engine: None, follow_up: false });
         assert!(is_ci_comment(&body("🧪 CI failures")));
         assert!(!is_ci_comment(&body("🐇 Review")));
     }

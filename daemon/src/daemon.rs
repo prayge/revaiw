@@ -936,7 +936,8 @@ fn record(repo: &Repo, cfg: &Config, st: &mut Status, j: &Job, o: &crate::model:
     let lp = ledger_path(repo, &j.branch);
     let mut ledger = Ledger::load(&lp);
     let mut o = o.clone();
-    if j.kind == Kind::Review { crate::ledger::converge(follow_up(&ledger, &j.entry), &mut o); }
+    let fu = j.kind == Kind::Review && follow_up(&ledger, &j.entry);
+    if fu { crate::ledger::converge(true, &mut o); }
     if j.kind == Kind::Ci {
         if let Some(base) = repo.range(None, &j.entry.head, &cfg.branches.base) {
             if let Some(changed) = repo.changed_files(&base, &j.entry.head) {
@@ -955,7 +956,7 @@ fn record(repo: &Repo, cfg: &Config, st: &mut Status, j: &Job, o: &crate::model:
     let body = render::summary(&render::Ctx {
         title, branch: &j.branch, base: &j.entry.base, head: &j.entry.head, model: &j.route.model,
         effort: j.route.effort, reason: &j.route.reason, out: o, ledger: &ledger, fixed_now: &merged.fixed,
-        engine: (j.kind == Kind::Review).then_some(engine.as_str()),
+        engine: (j.kind == Kind::Review).then_some(engine.as_str()), follow_up: fu,
     });
     let suffix = if j.kind == Kind::Ci { "-ci" } else { "" };
     let md = lp.with_file_name(format!("{}{suffix}.md", &j.entry.head[..7]));

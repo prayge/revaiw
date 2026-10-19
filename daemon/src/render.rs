@@ -17,6 +17,8 @@ pub struct Ctx<'a> {
     pub fixed_now: &'a [String],
     /// The engine shown in the footer, e.g. `/code-review medium`; None for a CI diagnosis.
     pub engine: Option<&'a str>,
+    /// A follow-up review: earlier nits are counted, not listed again (spec C5).
+    pub follow_up: bool,
 }
 
 /// A backtick fence one longer than the longest run inside `body`, so snippets can't close it early.
@@ -87,6 +89,10 @@ pub fn summary(c: &Ctx) -> String {
         s += "### 🔴 Important\n";
         for e in &imp { s += &finding_block(e, true); }
     }
+    if c.follow_up && !nits.is_empty() {
+        let _ = writeln!(s, "🟡 {} from earlier reviews (see the first review's comment)\n", plural(nits.len(), "nit"));
+    }
+    let nits = if c.follow_up { vec![] } else { nits };
     for (list, label) in [(&nits, "🟡 ".to_string() + &plural(nits.len(), "nit")),
                           (&pre, "🟣 ".to_string() + &plural(pre.len(), "pre-existing issue"))] {
         if list.is_empty() { continue; }
@@ -147,6 +153,17 @@ mod tests {
                   why: "because".into(), snippet: "const a = ```x```".into(), lang: "ts".into(),
                   suggested_patch: Some("- a\n+ b".into()), suggestion: Some("const a = 1".into()), on_base: false }
     }
+    #[test] fn a_follow_up_counts_earlier_nits_instead_of_listing_them() {
+        let mut l = Ledger::default();
+        l.merge(&ReviewOutput { findings: vec![fnd("nit", "old nit")], ..Default::default() }, "s1");
+        let out = ReviewOutput::default();
+        let s = summary(&Ctx { title: "🐇 Review", branch: "b", base: "a", head: "h", model: "m", effort: "e", reason: "r",
+                               out: &out, ledger: &l, fixed_now: &[], engine: None, follow_up: true });
+        assert!(s.contains("1 nit from earlier reviews") && !s.contains("old nit"), "{s}");
+        let full = summary(&Ctx { title: "🐇 Review", branch: "b", base: "a", head: "h", model: "m", effort: "e", reason: "r",
+                                  out: &out, ledger: &l, fixed_now: &[], engine: None, follow_up: false });
+        assert!(full.contains("old nit"), "{full}");
+    }
     #[test] fn fence_outgrows_content() {
         assert_eq!(fence("plain"), "```");
         assert_eq!(fence("has ``` inside"), "````");
@@ -161,7 +178,7 @@ mod tests {
         };
         l.merge(&out, "def5678");
         let s = summary(&Ctx { title: "🐇 Review", branch: "feat/x", base: "abc1234aaaa", head: "def5678bbbb", model: "claude-haiku-5-5",
-                               effort: "high", reason: "small", out: &out, ledger: &l, fixed_now: &["k".into()], engine: None });
+                               effort: "high", reason: "small", out: &out, ledger: &l, fixed_now: &["k".into()], engine: None, follow_up: false });
         assert!(s.starts_with(MARKER));
         assert!(s.contains("## 🐇 Review · `feat/x` @ `def5678`"));
         assert!(s.contains("**1 important · 1 nit · 1 pre-existing** — 1 fixed since last push"));
@@ -178,14 +195,14 @@ mod tests {
         let out = ReviewOutput { findings: vec![fnd("important", "x")], ..Default::default() };
         l.merge(&out, "h");
         let s = summary(&Ctx { title: "🐇 Review", branch: "b", base: "a", head: "h", model: "m", effort: "e", reason: "r",
-                               out: &out, ledger: &l, fixed_now: &[], engine: None });
+                               out: &out, ledger: &l, fixed_now: &[], engine: None, follow_up: false });
         assert!(s.contains("**1 important · 0 nits · 0 pre-existing**"), "{s}");
     }
     #[test] fn ci_runs_get_their_own_title() {
         let l = Ledger::default();
         let out = ReviewOutput::default();
         let s = summary(&Ctx { title: "🧪 CI failures", branch: "b", base: "h", head: "h", model: "m", effort: "e",
-                               reason: "r", out: &out, ledger: &l, fixed_now: &[], engine: None });
+                               reason: "r", out: &out, ledger: &l, fixed_now: &[], engine: None, follow_up: false });
         assert!(s.contains("## 🧪 CI failures · `b` @ `h`"), "{s}");
     }
     #[test] fn important_is_never_pluralised() {
@@ -195,21 +212,21 @@ mod tests {
         let out = ReviewOutput { findings: vec![fnd("important", "x"), b], ..Default::default() };
         l.merge(&out, "h");
         let s = summary(&Ctx { title: "t", branch: "b", base: "a", head: "h", model: "m", effort: "e", reason: "r",
-                               out: &out, ledger: &l, fixed_now: &[], engine: None });
+                               out: &out, ledger: &l, fixed_now: &[], engine: None, follow_up: false });
         assert!(s.contains("**2 important · 0 nits"), "{s}");
     }
     #[test] fn clean_run_says_so() {
         let l = Ledger::default();
         let out = ReviewOutput::default();
         let s = summary(&Ctx { title: "🐇 Review", branch: "b", base: "a", head: "h", model: "m", effort: "e", reason: "r",
-                               out: &out, ledger: &l, fixed_now: &[], engine: None });
+                               out: &out, ledger: &l, fixed_now: &[], engine: None, follow_up: false });
         assert!(s.contains("No open findings."));
     }
     #[test] fn partial_review_never_reads_as_clean() {
         let l = Ledger::default();
         let out = ReviewOutput { refused: vec!["Bash: git blame a.rs".into(), "Bash: find . -name x".into()], ..Default::default() };
         let s = summary(&Ctx { title: "🐇 Review", branch: "b", base: "a", head: "h", model: "m", effort: "e", reason: "r",
-                               out: &out, ledger: &l, fixed_now: &[], engine: None });
+                               out: &out, ledger: &l, fixed_now: &[], engine: None, follow_up: false });
         assert!(!s.contains("No open findings."), "{s}");
         assert!(s.contains("⚠️ Partial review: /code-review was refused 2 reads"), "{s}");
         // Published as program names only: arguments can carry secrets.
@@ -220,14 +237,14 @@ mod tests {
         let out = ReviewOutput::default();
         let s = summary(&Ctx { title: "🐇 Review", branch: "b", base: "abc1234", head: "def5678", model: "claude-sonnet-5-5",
                                effort: "medium", reason: "412 lines", out: &out, ledger: &l, fixed_now: &[],
-                               engine: Some("/code-review medium") });
+                               engine: Some("/code-review medium"), follow_up: false });
         assert!(s.contains("<sub>revaiw (with /code-review medium) · claude-sonnet-5-5 (412 lines) · abc1234..def5678</sub>"), "{s}");
     }
     #[test] fn an_incomplete_review_says_so_and_claims_no_refusal() {
         let l = Ledger::default();
         let out = ReviewOutput { incomplete: true, ..Default::default() };
         let s = summary(&Ctx { title: "🐇 Review", branch: "b", base: "a", head: "h", model: "m", effort: "e", reason: "r",
-                               out: &out, ledger: &l, fixed_now: &[], engine: None });
+                               out: &out, ledger: &l, fixed_now: &[], engine: None, follow_up: false });
         assert!(s.contains("⚠️ Partial review: /code-review did not complete the review") && !s.contains("refused"), "{s}");
     }
     #[test] fn a_fix_comment_says_what_was_pushed_or_why_not() {
