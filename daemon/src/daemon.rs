@@ -824,16 +824,26 @@ fn finish_fix(repo: &Repo, cfg: &Config, q: &mut Queue, st: &mut Status, j: Job,
 /// leaves them out and the review still runs.
 fn settled_guidance(repo: &Repo, b: &str, files: &[String]) -> String {
     let lines = crate::ledger::settled(&repo.root.join(".reviews"), files);
-    let rulings = github::posting_enabled().then(|| github::pr_body_author(b)).flatten().and_then(|(author, body)| {
-        let r = github::rulings_section(&body)?;
-        let slug = github::repo_slug()?;
-        match github::permission(&slug, &author) {
-            Ok(p) if crate::mention::can_trigger(p.trim()) => Some(r),
-            Ok(_) => { log!("{b}: Rulings by @{author} ignored: no write permission"); None }
-            Err(e) => { log!("{b}: Rulings left out: permission lookup failed: {e}"); None }
+    let rulings = github::posting_enabled().then(|| match github::pr_body_author(b) {
+        Ok(Some((author, body))) => {
+            let r = github::rulings_section(&body)?;
+            let slug = github::repo_slug()?;
+            rulings_if_writer(r, github::permission(&slug, &author))
+                .map_err(|why| log!("{b}: Rulings by @{author} left out: {why}")).ok()
         }
-    });
+        Ok(None) => None,
+        Err(e) => { log!("{b}: Rulings left out: PR lookup failed: {e}"); None }
+    }).flatten();
     review::settled_block(&lines, rulings.as_deref())
+}
+
+/// The PR's Rulings steer the review only when its author can write to the repo; `Err` carries the reason to log.
+fn rulings_if_writer(rulings: String, permission: Result<String, String>) -> Result<String, String> {
+    match permission {
+        Ok(p) if crate::mention::can_trigger(p.trim()) => Ok(rulings),
+        Ok(p) => Err(format!("no write permission ({})", p.trim())),
+        Err(e) => Err(format!("permission lookup failed: {e}")),
+    }
 }
 
 /// A pinned `revaiw now` asks for a second opinion, so it is never a nits-free follow-up.
@@ -1215,5 +1225,12 @@ mod tests {
         let repo = crate::git::Repo { root: "/r".into(), common: "/r/.git".into(), remote: "origin".into() };
         assert_eq!(super::state_dir(&repo), std::path::PathBuf::from("/r/.git/revaiw"));
         assert_eq!(crate::render::MARKER, "<!-- revaiw -->");
+    }
+    #[test] fn rulings_count_only_from_a_writer() {
+        for p in ["write", "admin", "maintain", " write\n"] {
+            assert_eq!(super::rulings_if_writer("r".into(), Ok(p.into())), Ok("r".into()), "{p:?}");
+        }
+        for p in ["read", "triage", "none", ""] { assert!(super::rulings_if_writer("r".into(), Ok(p.into())).is_err(), "{p:?}"); }
+        assert!(super::rulings_if_writer("r".into(), Err("404".into())).is_err());
     }
 }

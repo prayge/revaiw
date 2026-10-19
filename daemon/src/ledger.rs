@@ -53,22 +53,30 @@ pub fn demote_outside(out: &mut ReviewOutput, changed: &std::collections::HashSe
 /// then holds on the branch it merges into. At most 30, deduped by file and summary.
 pub fn settled(reviews: &Path, files: &[String]) -> Vec<String> {
     let mut out: Vec<String> = vec![];
+    let mut seen = std::collections::HashSet::new();
     let mut stack = vec![reviews.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let Ok(rd) = std::fs::read_dir(&dir) else { continue };
-        for e in rd.flatten() {
-            let p = e.path();
-            if p.is_dir() { stack.push(p); continue; }
-            if p.file_name().is_none_or(|n| n != "ledger.json") { continue; }
+        let mut entries: Vec<_> = rd.flatten().collect();
+        entries.sort_by_key(|e| e.path());
+        let mut subdirs = vec![];
+        for de in entries {
+            let Ok(ft) = de.file_type() else { continue };
+            let p = de.path();
+            if ft.is_dir() { subdirs.push(p); continue; }
+            if !ft.is_file() || p.file_name().is_none_or(|n| n != "ledger.json") { continue; }
             for e in Ledger::load(&p).findings.values() {
                 let Some(why) = e.decision_reason.as_deref() else { continue };
                 if !matches!(e.status.as_str(), "dismissed" | "deferred") || !files.contains(&e.f.file) { continue; }
-                let line = format!("- `{}:{}` {} — {}: {why}", e.f.file, e.f.line, e.f.summary, e.status);
-                if !out.iter().any(|l| l.starts_with(&format!("- `{}:", e.f.file)) && l.contains(&e.f.summary)) { out.push(line); }
+                let norm = e.f.summary.to_lowercase().split_whitespace().collect::<Vec<_>>().join(" ");
+                if seen.insert((e.f.file.clone(), norm)) {
+                    out.push(format!("- `{}:{}` {} — {}: {why}", e.f.file, e.f.line, e.f.summary, e.status));
+                    if out.len() == 30 { return out; }
+                }
             }
         }
+        stack.extend(subdirs.into_iter().rev());
     }
-    out.truncate(30);
     out
 }
 
@@ -375,5 +383,44 @@ mod tests {
         assert_eq!(got.len(), 1, "{got:?}");
         assert!(got[0].contains("a.ts") && got[0].contains("x can be null") && got[0].contains("by design"), "{got:?}");
         assert!(settled(&d.path().join("missing"), &["a.ts".to_string()]).is_empty());
+    }
+    fn decided(l: &mut Ledger, f: Finding, status: &str, why: Option<&str>) {
+        let id = finding_id(&f);
+        l.merge(&ReviewOutput { findings: vec![f], ..Default::default() }, "s1");
+        let e = l.findings.get_mut(&id).unwrap();
+        e.status = status.into();
+        e.decision_reason = why.map(Into::into);
+    }
+    #[test] fn settled_keeps_distinct_rulings_includes_deferred_and_needs_a_reason() {
+        let d = tempfile::tempdir().unwrap();
+        let mut l = Ledger::default();
+        decided(&mut l, fnd("a.ts", "y"), "dismissed", Some("by design"));
+        decided(&mut l, fnd("a.ts", "z"), "deferred", Some("why y matters later"));
+        decided(&mut l, fnd("a.ts", "no reason"), "dismissed", None);
+        decided(&mut l, fnd("a.ts", "still open"), "open", Some("r"));
+        l.save(&d.path().join("one/ledger.json"));
+        let mut m = Ledger::default();
+        decided(&mut m, fnd("a.ts", "Y "), "dismissed", Some("other branch"));
+        m.save(&d.path().join("two/ledger.json"));
+        let got = settled(d.path(), &["a.ts".to_string()]);
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert!(got.iter().any(|g| g.contains("`a.ts:1` y ") && g.contains("dismissed")), "{got:?}");
+        assert!(got.iter().any(|g| g.contains(" z ") && g.contains("deferred")), "{got:?}");
+    }
+    #[test] fn settled_stops_at_thirty() {
+        let d = tempfile::tempdir().unwrap();
+        let mut l = Ledger::default();
+        for i in 0..40 { decided(&mut l, fnd("a.ts", &format!("finding {i}")), "dismissed", Some("r")); }
+        l.save(&d.path().join("b/ledger.json"));
+        assert_eq!(settled(d.path(), &["a.ts".to_string()]).len(), 30);
+    }
+    #[test] fn settled_does_not_follow_symlinks() {
+        let d = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let mut l = Ledger::default();
+        decided(&mut l, fnd("a.ts", "x"), "dismissed", Some("r"));
+        l.save(&outside.path().join("ledger.json"));
+        std::os::unix::fs::symlink(outside.path(), d.path().join("link")).unwrap();
+        assert!(settled(d.path(), &["a.ts".to_string()]).is_empty());
     }
 }

@@ -164,9 +164,6 @@ pub fn skill_guidance(c: &crate::config::Config, files: &[String]) -> String {
     if lines.is_empty() { String::new() } else { format!("\n\n# Skills for this diff\n\n{}\n", lines.join("\n")) }
 }
 
-/// A `@review` request, appended to the engine's and the formatter's guidance. The text is the requester's own
-/// words, quoted and capped: a question the review should answer, never a change to its tools, scope or rules
-/// (spec D8). Tools and settings are fixed on the command line, so a quoted line asking for more grants nothing.
 /// Decisions made outside this review (spec C3): ledger rulings from any branch, and the PR body's `## Rulings` from
 /// a writer, quoted. They settle behaviour only; tools and settings are fixed on the command line.
 pub fn settled_block(lines: &[String], rulings: Option<&str>) -> String {
@@ -182,6 +179,9 @@ pub fn settled_block(lines: &[String], rulings: Option<&str>) -> String {
     s
 }
 
+/// A `@review` request, appended to the engine's and the formatter's guidance. The text is the requester's own
+/// words, quoted and capped: a question the review should answer, never a change to its tools, scope or rules
+/// (spec D8). Tools and settings are fixed on the command line, so a quoted line asking for more grants nothing.
 pub fn request_block(r: &crate::queue::Request) -> String {
     let text: String = r.text.chars().take(2000).collect();
     let quoted: String = text.lines().map(|l| format!("> {l}\n")).collect();

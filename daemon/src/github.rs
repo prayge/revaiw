@@ -134,24 +134,6 @@ pub fn add_reaction(slug: &str, issue_comment_id: u64, content: &str) {
 }
 
 /// `admin`, `maintain`, `write`, `triage`, `read` or `none`. A non-collaborator is a 404, so an `Err`.
-/// The open PR's author and body, for its `## Rulings` (spec C3).
-pub fn pr_body_author(branch: &str) -> Option<(String, String)> {
-    let out = gh(&["pr", "list", "--head", branch, "--state", "open", "--json", "author,body", "--limit", "1"], None).ok()?;
-    let v: Value = serde_json::from_str(&out).ok()?;
-    let p = v.get(0)?;
-    Some((p["author"]["login"].as_str()?.to_string(), p["body"].as_str().unwrap_or("").to_string()))
-}
-
-/// The text under a `## Rulings` heading (any case) up to the next `## ` heading, at most 2000 characters. None when
-/// there is no such section or it is empty.
-pub fn rulings_section(body: &str) -> Option<String> {
-    let mut lines = body.lines().skip_while(|l| !l.trim().eq_ignore_ascii_case("## rulings"));
-    lines.next()?;
-    let text: String = lines.take_while(|l| !l.starts_with("## ")).collect::<Vec<_>>().join("\n");
-    let text = text.trim();
-    (!text.is_empty()).then(|| text.chars().take(2000).collect())
-}
-
 pub fn permission(slug: &str, login: &str) -> Result<String, String> {
     gh(&["api", &format!("repos/{slug}/collaborators/{login}/permission"), "--jq", ".permission"], None)
 }
@@ -390,6 +372,30 @@ pub fn open_prs() -> Result<Vec<(String, Pr)>, String> {
     Ok(parse_open_prs(&out))
 }
 
+/// The open same-repo PR's author and body, for its `## Rulings` (spec C3). `Ok(None)` when the branch has no open PR.
+pub fn pr_body_author(branch: &str) -> Result<Option<(String, String)>, String> {
+    let out = gh(&["pr", "list", "--head", branch, "--state", "open", "--json", "author,body,isCrossRepository",
+                   "--limit", "10"], None)?;
+    parse_pr_body_author(&out)
+}
+
+/// A fork's PR can share our branch's name and its body is the fork author's to write, so only same-repo PRs count.
+fn parse_pr_body_author(json: &str) -> Result<Option<(String, String)>, String> {
+    let v: Value = serde_json::from_str(json).map_err(|e| format!("gh pr list: {e}"))?;
+    Ok(v.as_array().into_iter().flatten().filter(|p| p["isCrossRepository"].as_bool() == Some(false))
+        .find_map(|p| Some((p["author"]["login"].as_str()?.to_string(), p["body"].as_str().unwrap_or("").to_string()))))
+}
+
+/// The text under a `## Rulings` heading (any case) up to the next `## ` heading, at most 2000 characters. None when
+/// there is no such section or it is empty.
+pub fn rulings_section(body: &str) -> Option<String> {
+    let mut lines = body.lines().skip_while(|l| !l.trim().eq_ignore_ascii_case("## rulings"));
+    lines.next()?;
+    let text: String = lines.take_while(|l| !l.starts_with("## ")).collect::<Vec<_>>().join("\n");
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.chars().take(2000).collect())
+}
+
 /// Same-repo PRs only: a fork's head branch can share a name with one of ours, and revaiw must never review or
 /// push to ours on the fork's behalf.
 pub fn parse_open_prs(json: &str) -> Vec<(String, Pr)> {
@@ -569,5 +575,13 @@ mod tests {
         assert_eq!(rulings_section("## Summary\nno rulings here"), None);
         assert_eq!(rulings_section("## Rulings\n\n## Next"), None, "an empty section is none");
         assert!(rulings_section(&format!("## Rulings\n{}", "x".repeat(5000))).unwrap().chars().count() <= 2000);
+    }
+    #[test] fn pr_body_author_takes_the_first_same_repo_pr() {
+        let json = r###"[{"author":{"login":"fork"},"body":"f","isCrossRepository":true},
+                       {"author":{"login":"kim"},"body":"## Rulings\nx","isCrossRepository":false}]"###;
+        assert_eq!(parse_pr_body_author(json), Ok(Some(("kim".into(), "## Rulings\nx".into()))));
+        assert_eq!(parse_pr_body_author(r#"[{"author":{"login":"fork"},"body":"f","isCrossRepository":true}]"#), Ok(None));
+        assert_eq!(parse_pr_body_author("[]"), Ok(None));
+        assert!(parse_pr_body_author("not json").is_err());
     }
 }
